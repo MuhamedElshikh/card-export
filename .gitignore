@@ -1,0 +1,43 @@
+# Build output
+bin/
+obj/
+dist/
+out/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Tests
+TestResults/
+*.trx
+coverage/
+
+# Local databases and encrypted image blobs
+*.db
+*.db-shm
+*.db-wal
+*.mdf
+*.ldf
+App_Data/
+
+# NEVER commit ID card images or real personal data.
+samples/
+sample-images/
+test-images/
+testdata/
+*.id-card.*
+!src/**/assets/**
+
+# Local secrets
+appsettings.Local.json
+.env
+*.env.local

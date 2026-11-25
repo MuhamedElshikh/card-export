@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/Api/">
+    <Project Path="Api/IdCardReader.Api.csproj" />
+  </Folder>
+  <Folder Name="/Application/">
+    <Project Path="Application/IdCardReader.Application.csproj" />
+  </Folder>
+  <Folder Name="/Domain/">
+    <Project Path="Domain/IdCardReader.Domain.csproj" />
+  </Folder>
+  <Folder Name="/Infrastructure/">
+    <Project Path="Infrastructure/IdCardReader.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/Tests/" />
+  <Folder Name="/Tests/Api.Tests/">
+    <Project Path="Tests/Api.Tests/IdCardReader.Api.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Tests/Application.Tests/">
+    <Project Path="Tests/Application.Tests/IdCardReader.Application.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Tests/Infrastructure.IntegrationTests/">
+    <Project Path="Tests/Infrastructure.IntegrationTests/IdCardReader.Infrastructure.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
