@@ -11,6 +11,6 @@ export const appConfig: ApplicationConfig = {
     provideRouter(routes, withComponentInputBinding()),
     provideHttpClient(withFetch()),
     provideTranslateService(),
-    { provide: API_BASE_URL, useValue: '' },
+    { provide: API_BASE_URL, useValue: 'http://localhost:5143' },
   ],
 };

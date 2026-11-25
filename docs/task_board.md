@@ -60,6 +60,17 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
       photo both extract `29001011234567`; blank paper yields no number.
 - [ ] Real-photo accuracy/latency/RAM figures still need the user's own images.
 
+## Phase 7 — stop inventing data (user complaint)
+- [x] Root cause reproduced with 6 failing tests before changing implementation.
+- [x] No sliding 14-digit windows and no digits joined across lines: only an exact, valid
+      14-digit run on one OCR line is a candidate.
+- [x] A single direct read is always `lowConfidence=true`; two independent passes are required
+      to stop the rotation search.
+- [x] `الاسم بالكامل` stripped as one label; names need 2+ tokens; card headings and unlabelled
+      lines never become name/address.
+- [x] Tests: 19 application + 12 API + 47 infrastructure = **78 green, 0 warnings**.
+- [ ] Tune digit/name recognition on the user's real photo (still not supplied).
+
 ## Known gaps (honest list)
 - Card contour detection + perspective correction is not implemented (no usable OpenCV binding on net8).
 - Per-field crops from a JSON layout template are not implemented; whole-image OCR is used.

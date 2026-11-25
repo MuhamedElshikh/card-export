@@ -13,7 +13,13 @@ public static class ArabicTextFields
     private const double MinimumAddressLetterRatio = 0.65;
     private const int MinimumFieldLength = 6;
 
-    private static readonly string[] NameLabels = { "الاسم", "اسم" };
+    // The full label must be tried first, otherwise "بالكامل" is mistaken for the person's name.
+    private static readonly string[] NameLabels = { "الاسم بالكامل", "اسم بالكامل", "الاسم", "اسم" };
+
+    private static readonly string[] NotAName =
+    {
+        "جمهورية", "العربية", "بطاقة", "قومي", "المحافظة", "العنوان", "الاسم"
+    };
 
     private static readonly string[] AddressLabels =
     {
@@ -50,7 +56,8 @@ public static class ArabicTextFields
                 .FirstOrDefault(line => IsNameLike(line));
         }
 
-        name ??= lines.Select(line => line.Text).FirstOrDefault(line => IsNameLike(line));
+        // No unlabelled line is ever promoted to a name. A missing name is edited by the user;
+        // a guessed name (a card heading, a governorate, the label remainder) is not.
 
         string? address = null;
         foreach (var line in lines)
@@ -75,17 +82,7 @@ public static class ArabicTextFields
             address = afterLabel.Count == 0 ? null : string.Join(" ", afterLabel);
         }
 
-        if (address is null)
-        {
-            var candidates = lines
-                .Select(line => line.Text)
-                .Where(IsAddressLike)
-                .Where(line => !SameLine(line, name))
-                .Take(2)
-                .ToList();
-
-            address = candidates.Count == 0 ? null : string.Join(" ", candidates);
-        }
+        // Unlabelled Arabic text is not promoted to an address either.
 
         if (SameLine(address, name))
         {
@@ -109,13 +106,13 @@ public static class ArabicTextFields
             return false;
         }
 
-        var tokens = CountTokens(trimmed);
-        if (tokens is < 1 or > 7)
+        var tokens = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length is < 2 or > 8)
         {
             return false;
         }
 
-        if (trimmed.Any(char.IsDigit))
+        if (trimmed.Any(char.IsDigit) || tokens.Any(token => NotAName.Contains(token, StringComparer.Ordinal)))
         {
             return false;
         }

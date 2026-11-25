@@ -81,16 +81,21 @@ SQLite builds the schema from the model (`EnsureCreated`).
    convincing was found. Each orientation is read twice: `eng` with a Western-digit whitelist
    (much better at printed digits) and `ara` with Western plus Arabic-Indic digits. The search
    stops as soon as two direct passes agree.
-5. `DigitCandidates` ignores spaces between printed digit groups, normalises Arabic-Indic/Persian
-   digits, keeps only domain-valid 14-digit values and votes among them. The winner needs >= 60 %
-   of the votes **and** at least one direct read; sliding windows inside a noise run and lines
-   joined by the fallback are flagged `lowConfidence=true`.
+5. **No invented data:** `DigitCandidates` accepts a number only when one OCR line contains exactly
+   14 digits (spaces between printed groups are ignored) and the value passes domain validation.
+   Sliding windows inside longer digit runs and digits joined across lines are never accepted —
+   they are arithmetic coincidences. The winner needs >= 60 % of the votes **and** at least two
+   independent direct reads; a single read is reported as `lowConfidence=true`.
 6. Name/address are read once at `Ocr:TextLongEdge` (1800 px) on the winning orientation with the
-   Arabic model (Auto layout, SparseText retry). `ArabicTextFields` removes printed labels and
-   rejects symbol/digit soup: an empty field is better than a wrong one. Both stay user-editable.
-7. Tesseract engines are pooled and leased, never created per request. Concurrency is bounded by
+   Arabic model (Auto layout, SparseText retry). `ArabicTextFields` strips the **whole** label
+   (including `بالكامل`, which otherwise becomes the "name"), requires at least two name tokens,
+   rejects card headings, and never promotes an unlabelled line to a name or address. An empty field
+   is better than a wrong one. Both stay user-editable.
+7. Birth date, gender and governorate are **derived from the accepted national ID**, not read from
+   the back of the card. When the ID is not accepted they stay empty.
+8. Tesseract engines are pooled and leased, never created per request. Concurrency is bounded by
    `SemaphoreSlim(Ocr:MaxConcurrentScans)` (default 1) so a dual-core box does not thrash.
-8. Intermediate PNGs live in a unique temp directory deleted in a `finally` block. Scan logs record
+9. Intermediate PNGs live in a unique temp directory deleted in a `finally` block. Scan logs record
    vote count, share, rotation, skew and pass count only — never names, addresses, numbers or bytes.
 
 **Still not implemented:** card contour detection and perspective warp. They need a contour/Hough

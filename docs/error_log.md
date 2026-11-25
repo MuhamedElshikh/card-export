@@ -66,3 +66,22 @@ candidate extraction, strict name/address filtering, pooled engines. See `docs/a
 so a 200×100 image was blown up to 1600 px on every scan.
 **Fix:** keep the current size when it is smaller than the maximum, and only raise it when
 `minimumLongEdge` is set. Covered by `ImagePreprocessorTests`.
+
+## 12. User: "guessed data, no first name, card number completely wrong"
+**Reproduced with failing tests before any fix** (`dotnet test` on 47 infrastructure tests):
+- `Assert.Empty()` failed: OCR noise `990012900101123456789` produced a candidate
+  `29001011234567` via a sliding 14-digit window; digits split over lines were joined as a
+  "document fallback". Both passes could produce the same coincidence, so it won the vote,
+  became `NationalId` and generated a birth date/gender/governorate from thin air.
+- `Assert.Null()` failed: unlabelled text `جمهورية مصر العربية` became the full name.
+- `Assert.Equal()` failed: `الاسم بالكامل: أحمد محمد علي` produced the name
+  `بالكامل: أحمد محمد علي` (and `الاسم بالكامل` alone produced `بالكامل`) because only
+  `الاسم` was stripped.
+**Fix:**
+- `DigitCandidates.Extract` now accepts only an exact 14-digit run on one line; no windows, no
+  joined lines, no fallback. `VoteResult.LowConfidence` also requires two independent direct reads.
+- `ArabicTextFields` strips the complete label, requires 2+ name tokens, rejects card headings and
+  never promotes unlabelled text to name/address.
+- Tests rewritten to assert the absence of invented values. 78 backend tests green.
+**Still open:** real-photo digit/name accuracy needs the user's own image; no sample IDs may be
+fabricated to measure it.

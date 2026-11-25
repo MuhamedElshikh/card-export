@@ -53,34 +53,33 @@ public sealed class DigitCandidatesTests
     }
 
     [Fact]
-    public void Extract_SlidingWindowInsideNoiseIsNotDirect()
+    public void Extract_NeverInventsANumberFromSlidingWindows()
     {
-        var candidates = DigitCandidates.Extract("990012900101123456789", "pass", direct: true).ToList();
-
-        var candidate = Assert.Single(candidates);
-        Assert.Equal(ValidId, candidate.Value);
-        Assert.False(candidate.Direct);
+        // A 14-digit window that happens to pass date/governorate checks is still not a reading.
+        Assert.Empty(DigitCandidates.Extract("990012900101123456789", "pass", direct: true));
     }
 
     [Fact]
-    public void Extract_JoinsLinesAsFallbackOnly()
+    public void Extract_NeverJoinsDigitsFromDifferentLines()
     {
-        var candidates = DigitCandidates.Extract("2900101\n1234567", "pass", direct: true).ToList();
+        var candidates = DigitCandidates.Extract($"2900101\n1234567\n{OtherValidId}", "pass", direct: true).ToList();
 
-        var candidate = Assert.Single(candidates);
-        Assert.Equal(ValidId, candidate.Value);
-        Assert.False(candidate.Direct);
-        Assert.Contains("document", candidate.Source);
-    }
-
-    [Fact]
-    public void Extract_PrefersLineReadsOverDocumentFallback()
-    {
-        var candidates = DigitCandidates.Extract($"29001011\n1234567\n{OtherValidId}", "pass", direct: true).ToList();
-
+        // Only the complete line is a reading; the two halves are never glued together.
         var candidate = Assert.Single(candidates);
         Assert.Equal(OtherValidId, candidate.Value);
         Assert.True(candidate.Direct);
+    }
+
+    [Fact]
+    public void Vote_OneDirectReadIsNotConfidentEnough()
+    {
+        var candidates = new[] { new DigitCandidates.Candidate(ValidId, true, "eng") };
+
+        var vote = DigitCandidates.Vote(candidates);
+
+        Assert.Equal(ValidId, vote.Value);
+        Assert.True(vote.LowConfidence);
+        Assert.False(DigitCandidates.HasStrongWinner(candidates));
     }
 
     [Fact]
