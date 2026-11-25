@@ -1,0 +1,28 @@
+<div class="shell">
+  <header class="shell__header">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true">ID</span>
+      <span class="brand__text">
+        <strong>{{ 'app.title' | translate }}</strong>
+        <small>{{ 'app.subtitle' | translate }}</small>
+      </span>
+    </div>
+
+    <nav class="shell__nav">
+      <a routerLink="/scan" routerLinkActive="is-active">{{ 'nav.scan' | translate }}</a>
+      <a routerLink="/records" routerLinkActive="is-active">{{ 'nav.records' | translate }}</a>
+    </nav>
+
+    <button type="button" class="ghost-button" (click)="toggleLanguage()">
+      {{ 'lang.switchTo' | translate }}
+    </button>
+  </header>
+
+  <main class="shell__main">
+    <router-outlet />
+  </main>
+
+  <footer class="shell__footer">
+    <span>{{ 'footer.privacy' | translate }}</span>
+  </footer>
+</div>

@@ -11,14 +11,12 @@
   <Folder Name="/Infrastructure/">
     <Project Path="Infrastructure/IdCardReader.Infrastructure.csproj" />
   </Folder>
-  <Folder Name="/Tests/" />
-  <Folder Name="/Tests/Api.Tests/">
+  <Folder Name="/Tests/">
     <Project Path="Tests/Api.Tests/IdCardReader.Api.Tests.csproj" />
-  </Folder>
-  <Folder Name="/Tests/Application.Tests/">
     <Project Path="Tests/Application.Tests/IdCardReader.Application.Tests.csproj" />
-  </Folder>
-  <Folder Name="/Tests/Infrastructure.IntegrationTests/">
     <Project Path="Tests/Infrastructure.IntegrationTests/IdCardReader.Infrastructure.IntegrationTests.csproj" />
+  </Folder>
+  <Folder Name="/Tools/">
+    <Project Path="Tools/IdCards.Eval/IdCards.Eval.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,125 @@
+<section class="panel">
+  <header class="panel__header">
+    <div>
+      <h1>{{ 'scan.heading' | translate }}</h1>
+      <p class="muted">{{ 'scan.intro' | translate }}</p>
+    </div>
+  </header>
+
+  <label class="dropzone">
+    <span class="dropzone__icon" aria-hidden="true">⬆</span>
+    <strong>{{ (previewUrl() ? 'scan.change' : 'scan.choose') | translate }}</strong>
+    <span class="muted">{{ 'scan.hint' | translate }}</span>
+    <input
+      type="file"
+      accept="image/png,image/jpeg"
+      [disabled]="scanning()"
+      (change)="onFileSelected($event)"
+      aria-label="{{ 'scan.choose' | translate }}" />
+  </label>
+
+  @if (previewUrl(); as preview) {
+    <div class="preview">
+      <img [src]="preview" alt="{{ 'scan.heading' | translate }}" />
+    </div>
+  }
+
+  @if (scanning()) {
+    <p class="muted scanning">
+      <span class="spinner" aria-hidden="true"></span>{{ 'scan.scanning' | translate }}
+    </p>
+  }
+
+  @if (errorCode(); as code) {
+    <div class="alert alert--error" role="alert">{{ ('errors.' + code) | translate }}</div>
+  }
+
+  @if (savedId(); as id) {
+    <div class="alert alert--success" role="status">{{ 'scan.saved' | translate: { id } }}</div>
+  }
+</section>
+
+@if (showForm()) {
+  <section class="panel">
+    <header class="panel__header">
+      <div>
+        <h2>{{ 'scan.review' | translate }}</h2>
+        <p class="muted">{{ 'scan.reviewHint' | translate }}</p>
+      </div>
+    </header>
+
+    @if (lowConfidence()) {
+      <div class="alert alert--warning" role="status">{{ 'scan.lowConfidence' | translate }}</div>
+    }
+
+    @if (!derived() && nationalIdTouched()) {
+      <div class="alert alert--error" role="alert">
+        {{ (nationalId().length === 0 ? 'scan.nothingDetected' : 'scan.invalidNationalId') | translate }}
+      </div>
+    }
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="nationalId">{{ 'fields.nationalId' | translate }}</label>
+        <input
+          id="nationalId"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          dir="ltr"
+          [class.is-invalid]="!derived() && nationalIdTouched()"
+          [value]="nationalId()"
+          (input)="onNationalIdInput($event)" />
+        <span class="field__hint">{{ 'fields.nationalIdHint' | translate }}</span>
+      </div>
+
+      <div class="field">
+        <label for="fullName">{{ 'fields.fullName' | translate }}</label>
+        <input
+          id="fullName"
+          type="text"
+          autocomplete="off"
+          [value]="fullName()"
+          (input)="onFullNameInput($event)" />
+      </div>
+
+      <div class="field field--wide">
+        <label for="address">{{ 'fields.address' | translate }}</label>
+        <input
+          id="address"
+          type="text"
+          autocomplete="off"
+          [value]="address()"
+          (input)="onAddressInput($event)" />
+      </div>
+    </div>
+
+    @if (derived(); as info) {
+      <div class="derived">
+        <div class="derived__item">
+          <span>{{ 'fields.birthDate' | translate }}</span>
+          <strong dir="ltr">{{ info.birthDate }}</strong>
+        </div>
+        <div class="derived__item">
+          <span>{{ 'fields.gender' | translate }}</span>
+          <strong>{{ (info.isMale ? 'common.male' : 'common.female') | translate }}</strong>
+        </div>
+        <div class="derived__item">
+          <span>{{ 'fields.governorate' | translate }}</span>
+          <strong>{{ governorateLabel(info) }}</strong>
+        </div>
+      </div>
+    }
+
+    <div class="actions">
+      <button type="button" class="primary-button" [disabled]="!canSave()" (click)="save()">
+        @if (saving()) {
+          <span class="spinner" aria-hidden="true"></span>{{ 'common.saving' | translate }}
+        } @else {
+          {{ 'common.save' | translate }}
+        }
+      </button>
+      <button type="button" class="ghost-button" (click)="reset()">{{ 'scan.newScan' | translate }}</button>
+    </div>
+  </section>
+}

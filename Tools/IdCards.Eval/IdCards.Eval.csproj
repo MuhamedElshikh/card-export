@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>IdCards.Eval</AssemblyName>
+    <RootNamespace>IdCards.Eval</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Infrastructure\IdCardReader.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\Infrastructure\tessdata\ara.traineddata" Link="tessdata\ara.traineddata" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

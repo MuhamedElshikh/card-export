@@ -1,0 +1,80 @@
+<section class="panel">
+  <header class="panel__header">
+    <div>
+      <h1>{{ 'records.heading' | translate }}</h1>
+      <p class="muted">{{ 'records.count' | translate: { total: totalCount() } }}</p>
+    </div>
+    <button type="button" class="ghost-button" [disabled]="loading()" (click)="applySearch()" hidden aria-hidden="true"></button>
+  </header>
+
+  <div class="toolbar">
+    <input
+      type="search"
+      [value]="searchTerm()"
+      placeholder="{{ 'records.searchPlaceholder' | translate }}"
+      aria-label="{{ 'records.search' | translate }}"
+      (input)="onSearchInput($event)"
+      (keyup.enter)="applySearch()" />
+    <button type="button" class="primary-button" (click)="applySearch()">{{ 'records.search' | translate }}</button>
+    @if (searchTerm().length > 0) {
+      <button type="button" class="ghost-button" (click)="clearSearch()">×</button>
+    }
+  </div>
+
+  @if (errorCode(); as code) {
+    <div class="alert alert--error" role="alert">{{ ('errors.' + code) | translate }}</div>
+  }
+
+  @if (loading()) {
+    <p class="muted"><span class="spinner" aria-hidden="true"></span>{{ 'common.loading' | translate }}</p>
+  } @else if (items().length === 0) {
+    <p class="empty">{{ 'records.empty' | translate }}</p>
+  } @else {
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>{{ 'records.name' | translate }}</th>
+            <th>{{ 'records.nationalId' | translate }}</th>
+            <th>{{ 'records.birthDate' | translate }}</th>
+            <th>{{ 'records.gender' | translate }}</th>
+            <th>{{ 'records.governorate' | translate }}</th>
+            <th>{{ 'records.confidence' | translate }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (card of items(); track card.id) {
+            <tr>
+              <td>{{ card.fullName }}</td>
+              <td dir="ltr">{{ card.nationalId }}</td>
+              <td dir="ltr">{{ birthDateLabel(card) }}</td>
+              <td>{{ genderLabel(card) | translate }}</td>
+              <td>{{ governorateLabel(card) }}</td>
+              <td>
+                <span class="badge" [class.badge--low]="card.lowConfidence" [class.badge--high]="!card.lowConfidence">
+                  {{ (card.lowConfidence ? 'records.low' : 'records.high') | translate }}
+                </span>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pager">
+      <span>{{ 'records.page' | translate: { page: page(), pages: totalPages() } }}</span>
+      <span class="pager__buttons">
+        <button type="button" class="ghost-button" [disabled]="page() <= 1" (click)="goToPage(page() - 1)">
+          {{ 'records.prev' | translate }}
+        </button>
+        <button
+          type="button"
+          class="ghost-button"
+          [disabled]="page() >= totalPages()"
+          (click)="goToPage(page() + 1)">
+          {{ 'records.next' | translate }}
+        </button>
+      </span>
+    </div>
+  }
+</section>
