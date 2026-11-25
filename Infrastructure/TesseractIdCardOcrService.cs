@@ -1,37 +1,72 @@
-using System.Text;
 using IdCardReader.Application;
 using IdCardReader.Domain;
+using IdCardReader.Infrastructure.Imaging;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using SkiaSharp;
 using Tesseract;
 
 namespace IdCardReader.Infrastructure;
 
 /// <summary>
-/// Tesseract based OCR for Egyptian national ID cards (Arabic LSTM model, fully offline).
-/// The number is read with three passes (free text + two digit-restricted passes) and the
-/// candidates that pass domain validation are combined with a majority vote.
-/// The named/address fields are best effort and are always reviewed by the user.
+/// Offline Tesseract OCR for Egyptian national ID cards.
+/// <para>
+/// The pipeline is deliberately cascaded so a normal, upright photo is cheap:
+/// </para>
+/// <list type="number">
+/// <item>decode + EXIF orientation, downscale, grayscale, contrast stretch;</item>
+/// <item>estimate and remove the small rotation of the text lines (deskew);</item>
+/// <item>binarise with a local mean threshold (tolerates shadows and uneven light);</item>
+/// <item>
+/// read digits from the upright orientation with the English model and the Arabic model;
+/// stop as soon as both agree, otherwise try 180°, 90° and 270°, then a global Otsu threshold;
+/// </item>
+/// <item>read the name and address once, at higher resolution, on the winning orientation.</item>
+/// </list>
+/// Name and address remain best effort and are always reviewed by the user.
 /// </summary>
-public sealed class TesseractIdCardOcrService : IIdCardOcrService
+public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
 {
-    private const string DigitWhitelist = "0123456789\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9";
-    private const double MinimumVoteShare = 0.6;
-    private const double MinimumTextConfidence = 0.6;
+    private const string WesternDigits = "0123456789";
 
-    private readonly string _tessdataPath;
+    private const string AllDigits =
+        "0123456789\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9";
+
+    // Upright first, then upside down (very common with phone cameras), then the sideways cases.
+    private static readonly int[] OrientationOrder = { 0, 2, 1, 3 };
+
+    private readonly TesseractOptions _options;
+    private readonly ILogger<TesseractIdCardOcrService> _logger;
     private readonly SemaphoreSlim _scanSemaphore;
+    private readonly TesseractEnginePool _arabicPool;
+    private readonly TesseractEnginePool _englishPool;
 
     /// <summary>Creates the service.</summary>
-    /// <param name="tessdataPath">Directory containing <c>ara.traineddata</c>.</param>
-    /// <param name="maxConcurrentScans">Maximum concurrent scans; keep at 1 on dual core machines.</param>
-    public TesseractIdCardOcrService(string tessdataPath, int maxConcurrentScans = 1)
+    public TesseractIdCardOcrService(
+        IOptions<TesseractOptions> options,
+        ILogger<TesseractIdCardOcrService>? logger = null)
     {
-        if (string.IsNullOrWhiteSpace(tessdataPath))
+        ArgumentNullException.ThrowIfNull(options);
+
+        _options = options.Value;
+        _logger = logger ?? NullLogger<TesseractIdCardOcrService>.Instance;
+
+        var tessdataPath = string.IsNullOrWhiteSpace(_options.TessdataPath)
+            ? Path.Combine(AppContext.BaseDirectory, "tessdata")
+            : _options.TessdataPath;
+
+        _arabicPool = new TesseractEnginePool(tessdataPath, "ara");
+        if (!_arabicPool.IsAvailable)
         {
-            throw new ArgumentException("A tessdata directory is required.", nameof(tessdataPath));
+            throw new InvalidOperationException(
+                $"The Arabic OCR model was not found in '{tessdataPath}'. The deployment is incomplete.");
         }
 
-        _tessdataPath = tessdataPath;
-        _scanSemaphore = new SemaphoreSlim(Math.Max(1, maxConcurrentScans), Math.Max(1, maxConcurrentScans));
+        _englishPool = new TesseractEnginePool(tessdataPath, "eng");
+
+        var concurrency = Math.Max(1, _options.MaxConcurrentScans);
+        _scanSemaphore = new SemaphoreSlim(concurrency, concurrency);
     }
 
     /// <inheritdoc />
@@ -54,238 +89,317 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService
 
     private IdCardScanResult Scan(byte[] imageBytes, CancellationToken cancellationToken)
     {
-        var tempPath = Path.Combine(Path.GetTempPath(), $"idcard-{Guid.NewGuid():N}");
-        File.WriteAllBytes(tempPath, imageBytes);
-
+        SKBitmap? decoded;
         try
         {
-            // The bundled ara.traineddata is LSTM only, so OEM 1 is required (OEM 3 needs legacy data).
-            using var engine = new TesseractEngine(_tessdataPath, "ara", EngineMode.LstmOnly);
-            engine.SetVariable("user_defined_dpi", "300");
-            engine.SetVariable("tessedit_do_osd", "0");
-
-            using var pix = Pix.LoadFromFile(tempPath);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            var textPass = RunPass(engine, pix, PageSegMode.SingleBlock, whitelist: null, out var textConfidence);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            var digitPassBlock = RunPass(engine, pix, PageSegMode.SingleBlock, DigitWhitelist, out _);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            var digitPassSparse = RunPass(engine, pix, PageSegMode.SparseText, DigitWhitelist, out _);
-
-            var candidates = new List<Candidate>();
-            candidates.AddRange(FindCandidates(textPass, direct: false));
-            candidates.AddRange(FindCandidates(digitPassBlock, direct: true));
-            candidates.AddRange(FindCandidates(digitPassSparse, direct: true));
-
-            var (nationalId, lowConfidenceVote) = Vote(candidates);
-
-            var (name, address) = ExtractNameAndAddress(textPass);
-
-            var result = new IdCardScanResult
-            {
-                NationalId = nationalId,
-                FullName = name,
-                Address = address,
-                NationalIdValid = false,
-                LowConfidence = nationalId is null || lowConfidenceVote || textConfidence < MinimumTextConfidence
-            };
-
-            if (nationalId is not null)
-            {
-                var parsed = NationalIdNumber.Create(nationalId);
-                var derived = NationalIdResult.FromParsedNumber(parsed, name, address);
-
-                result.NationalId = derived.NationalIdNumber;
-                result.NationalIdValid = true;
-                result.BirthDate = derived.BirthDate;
-                result.Gender = derived.Gender;
-                result.Governorate = derived.Governorate;
-                result.GovernorateEnglish = derived.GovernorateEnglish;
-                result.GovernorateArabic = derived.GovernorateArabic;
-            }
-
-            return result;
+            decoded = ImagePreprocessor.DecodeWithOrientation(imageBytes);
         }
-        finally
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            throw new ImageDecodeException("The uploaded image could not be decoded.", exception);
+        }
+
+        if (decoded is null)
+        {
+            throw new ImageDecodeException("The uploaded image could not be decoded.");
+        }
+
+        using (decoded)
+        {
+            var workDirectory = Path.Combine(Path.GetTempPath(), $"idcard-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(workDirectory);
+
             try
             {
-                File.Delete(tempPath);
+                var number = ReadNationalId(decoded, workDirectory, cancellationToken);
+                var (name, address) = ReadText(decoded, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
+
+                return BuildResult(number, name, address);
             }
-            catch (IOException)
+            finally
             {
-                // Temp file cleanup is best effort.
+                TryDeleteDirectory(workDirectory);
             }
         }
+    }
+
+    private NumberRead ReadNationalId(SKBitmap decoded, string workDirectory, CancellationToken cancellationToken)
+    {
+        using var small = ImagePreprocessor.ResizeToLongEdge(
+            decoded,
+            _options.NumberLongEdge,
+            minimumLongEdge: 900);
+        using var grayscale = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(small));
+
+        var skew = 0.0;
+        if (_options.EnablePreprocessing && _options.EnableDeskew)
+        {
+            using var probe = ImagePreprocessor.ResizeToLongEdge(grayscale, 420);
+            skew = ImagePreprocessor.EstimateSkewDegrees(probe);
+        }
+
+        using var deskewed = skew == 0
+            ? grayscale.Copy(SKColorType.Gray8)
+            : ImagePreprocessor.Rotate(grayscale, skew);
+
+        var votes = new List<DigitCandidates.Candidate>();
+        var byOrientation = new Dictionary<int, List<DigitCandidates.Candidate>>();
+        var passes = 0;
+
+        if (!_options.EnablePreprocessing)
+        {
+            var plain = CollectDigits(deskewed, 0, workDirectory, ref passes, cancellationToken);
+            votes.AddRange(plain);
+            byOrientation[0] = plain;
+        }
+        else
+        {
+            using (var binarized = ImagePreprocessor.BinarizeLocalMean(deskewed))
+            {
+                foreach (var turns in OrientationOrder)
+                {
+                    var read = CollectDigits(binarized, turns, workDirectory, ref passes, cancellationToken);
+                    votes.AddRange(read);
+                    byOrientation[turns] = read;
+
+                    if (DigitCandidates.HasStrongWinner(votes))
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (!DigitCandidates.HasStrongWinner(votes))
+            {
+                // Second opinion with a global threshold. Upright orientations only, to stay in budget.
+                using var otsu = ImagePreprocessor.BinarizeOtsu(deskewed);
+                foreach (var turns in new[] { 0, 2 })
+                {
+                    var read = CollectDigits(otsu, turns, workDirectory, ref passes, cancellationToken);
+                    votes.AddRange(read);
+
+                    if (byOrientation.TryGetValue(turns, out var existing))
+                    {
+                        existing.AddRange(read);
+                    }
+                    else
+                    {
+                        byOrientation[turns] = read;
+                    }
+
+                    if (DigitCandidates.HasStrongWinner(votes))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        var vote = DigitCandidates.Vote(votes);
+        var rotation = ResolveRotation(vote.Value, byOrientation);
+
+        _logger.LogInformation(
+            "OCR number pass finished. Votes={Votes} WinnerShare={Share:F2} DirectRead={DirectRead} " +
+            "Rotation={Rotation} Skew={Skew:F1} Passes={Passes}",
+            vote.Total,
+            vote.Share,
+            vote.HasDirectRead,
+            rotation,
+            skew,
+            passes);
+
+        return new NumberRead(vote.Value, vote.LowConfidence, rotation, skew);
+    }
+
+    private List<DigitCandidates.Candidate> CollectDigits(
+        SKBitmap bitmap,
+        int quarterTurns,
+        string workDirectory,
+        ref int passes,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var candidates = new List<DigitCandidates.Candidate>();
+
+        using var rotated = ImagePreprocessor.RotateQuarterTurns(bitmap, quarterTurns);
+        var path = Path.Combine(workDirectory, $"number-{quarterTurns}-{Guid.NewGuid():N}.png");
+        ImagePreprocessor.SavePng(rotated, path);
+
+        // The English model is markedly better at plain digits; the Arabic model also catches
+        // Arabic-Indic digits, which some printers use for the number.
+        if (_englishPool.Rent() is { } english)
+        {
+            using (english)
+            {
+                var text = RunPass(english.Engine, path, PageSegMode.SparseText, WesternDigits);
+                candidates.AddRange(DigitCandidates.Extract(text, $"eng-{quarterTurns}", direct: true));
+                passes++;
+            }
+        }
+
+        using (var arabic = _arabicPool.Rent())
+        {
+            if (arabic is null)
+            {
+                return candidates;
+            }
+
+            var text = RunPass(arabic.Engine, path, PageSegMode.SparseText, AllDigits);
+            candidates.AddRange(DigitCandidates.Extract(text, $"ara-{quarterTurns}", direct: true));
+            passes++;
+        }
+
+        return candidates;
+    }
+
+    private (string? Name, string? Address) ReadText(
+        SKBitmap decoded,
+        string workDirectory,
+        int quarterTurns,
+        double skew,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using var medium = ImagePreprocessor.ResizeToLongEdge(
+            decoded,
+            _options.TextLongEdge,
+            minimumLongEdge: 1200);
+        using var grayscale = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(medium));
+        using var oriented = quarterTurns == 0
+            ? grayscale.Copy(SKColorType.Gray8)
+            : ImagePreprocessor.RotateQuarterTurns(grayscale, quarterTurns);
+        using var deskewed = skew == 0
+            ? oriented.Copy(SKColorType.Gray8)
+            : ImagePreprocessor.Rotate(oriented, skew);
+
+        var path = Path.Combine(workDirectory, "text.png");
+        ImagePreprocessor.SavePng(deskewed, path);
+
+        string text;
+        using (var lease = _arabicPool.Rent())
+        {
+            if (lease is null)
+            {
+                return (null, null);
+            }
+
+            text = RunPass(lease.Engine, path, PageSegMode.Auto, whitelist: null);
+        }
+
+        var (name, address) = ArabicTextFields.Select(text);
+
+        if (name is null && address is null)
+        {
+            // Layout analysis failed to produce usable lines; try a sparse scan before giving up.
+            using var lease = _arabicPool.Rent();
+            if (lease is not null)
+            {
+                var sparse = RunPass(lease.Engine, path, PageSegMode.SparseText, whitelist: null);
+                (name, address) = ArabicTextFields.Select(sparse);
+            }
+        }
+
+        return (name, address);
     }
 
     private static string RunPass(
         TesseractEngine engine,
-        Pix pix,
+        string imagePath,
         PageSegMode pageSegMode,
-        string? whitelist,
-        out double meanConfidence)
+        string? whitelist)
     {
         engine.SetVariable("tessedit_char_whitelist", whitelist ?? string.Empty);
 
+        using var pix = Pix.LoadFromFile(imagePath);
         using var page = engine.Process(pix, pageSegMode);
-        meanConfidence = page.GetMeanConfidence();
 
         return page.GetText() ?? string.Empty;
     }
 
-    private static IEnumerable<Candidate> FindCandidates(string text, bool direct)
+    private static int ResolveRotation(
+        string? value,
+        IReadOnlyDictionary<int, List<DigitCandidates.Candidate>> byOrientation)
     {
-        var digits = NormalizeDigits(text);
-
-        var run = new StringBuilder();
-        foreach (var character in digits)
+        if (value is null)
         {
-            if (character is >= '0' and <= '9')
-            {
-                run.Append(character);
-                continue;
-            }
-
-            foreach (var candidate in Windows(run.ToString(), direct))
-            {
-                yield return candidate;
-            }
-
-            run.Clear();
+            return 0;
         }
 
-        foreach (var candidate in Windows(run.ToString(), direct))
+        foreach (var turns in OrientationOrder)
         {
-            yield return candidate;
+            if (byOrientation.TryGetValue(turns, out var candidates)
+                && candidates.Any(candidate => candidate.Value == value && candidate.Direct))
+            {
+                return turns;
+            }
         }
+
+        foreach (var turns in OrientationOrder)
+        {
+            if (byOrientation.TryGetValue(turns, out var candidates)
+                && candidates.Any(candidate => candidate.Value == value))
+            {
+                return turns;
+            }
+        }
+
+        return 0;
     }
 
-    private static IEnumerable<Candidate> Windows(string digits, bool direct)
+    private static IdCardScanResult BuildResult(NumberRead number, string? name, string? address)
     {
-        if (digits.Length < 14)
+        var result = new IdCardScanResult
         {
-            yield break;
+            NationalId = number.Value,
+            FullName = name,
+            Address = address,
+            NationalIdValid = false,
+            LowConfidence = number.LowConfidence
+        };
+
+        if (number.Value is null || NationalIdNumber.TryCreate(number.Value) is not { } parsed)
+        {
+            return result;
         }
 
-        if (digits.Length == 14)
-        {
-            if (IsValidNationalId(digits))
-            {
-                yield return new Candidate(digits, direct);
-            }
+        var derived = NationalIdResult.FromParsedNumber(parsed, name, address);
 
-            yield break;
-        }
+        result.NationalId = derived.NationalIdNumber;
+        result.NationalIdValid = true;
+        result.BirthDate = derived.BirthDate;
+        result.Gender = derived.Gender;
+        result.Governorate = derived.Governorate;
+        result.GovernorateEnglish = derived.GovernorateEnglish;
+        result.GovernorateArabic = derived.GovernorateArabic;
 
-        for (var index = 0; index <= digits.Length - 14; index++)
-        {
-            var window = digits.Substring(index, 14);
-            if (IsValidNationalId(window))
-            {
-                // Sliding windows inside a longer run are treated as the fallback path.
-                yield return new Candidate(window, false);
-            }
-        }
+        return result;
     }
 
-    private static bool IsValidNationalId(string digits)
+    private static void TryDeleteDirectory(string path)
     {
         try
         {
-            _ = NationalIdNumber.Create(digits);
-            return true;
+            Directory.Delete(path, recursive: true);
         }
-        catch (ArgumentException)
+        catch (IOException)
         {
-            return false;
+            // Temp cleanup is best effort.
         }
-    }
-
-    private static (string? Value, bool LowConfidence) Vote(IReadOnlyList<Candidate> candidates)
-    {
-        if (candidates.Count == 0)
+        catch (UnauthorizedAccessException)
         {
-            return (null, true);
+            // Temp cleanup is best effort.
         }
-
-        var winner = candidates
-            .GroupBy(candidate => candidate.Value)
-            .Select(group => new
-            {
-                Value = group.Key,
-                Votes = group.Count(),
-                HasDirectRead = group.Any(candidate => candidate.Direct)
-            })
-            .OrderByDescending(group => group.Votes)
-            .ThenByDescending(group => group.HasDirectRead)
-            .First();
-
-        var share = winner.Votes / (double)candidates.Count;
-        var lowConfidence = share < MinimumVoteShare || !winner.HasDirectRead;
-
-        return (winner.Value, lowConfidence);
     }
 
-    private static (string? Name, string? Address) ExtractNameAndAddress(string text)
+    /// <inheritdoc />
+    public void Dispose()
     {
-        var lines = text
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(StripLabels)
-            .Where(line => line.Length >= 3)
-            .Where(line => line.Count(char.IsLetter) >= 2)
-            .Where(line => !IsMostlyDigits(line))
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-
-        if (lines.Count == 0)
-        {
-            return (null, null);
-        }
-
-        var name = lines[0];
-        var address = lines.Count > 1 ? string.Join(" ", lines.Skip(1)) : null;
-        return (name, address);
+        _scanSemaphore.Dispose();
+        _arabicPool.Dispose();
+        _englishPool.Dispose();
     }
 
-    private static string StripLabels(string line)
-    {
-        var trimmed = line.Trim();
-        foreach (var label in new[] { "الاسم", "اسم", "العنوان", "عنوان", "الرقم القومى", "الرقم القومي" })
-        {
-            if (trimmed.StartsWith(label, StringComparison.Ordinal))
-            {
-                trimmed = trimmed[label.Length..];
-            }
-        }
-
-        return trimmed.Trim(' ', ':', '-', '.', '\t', '\r');
-    }
-
-    private static bool IsMostlyDigits(string line)
-    {
-        var digits = line.Count(char.IsDigit);
-        return line.Length > 0 && digits > line.Length / 2;
-    }
-
-    private static string NormalizeDigits(string text)
-    {
-        var builder = new StringBuilder(text.Length);
-        foreach (var character in text)
-        {
-            builder.Append(character switch
-            {
-                >= '\u0660' and <= '\u0669' => (char)('0' + (character - '\u0660')),
-                >= '\u06F0' and <= '\u06F9' => (char)('0' + (character - '\u06F0')),
-                _ => character
-            });
-        }
-
-        return builder.ToString();
-    }
-
-    private readonly record struct Candidate(string Value, bool Direct);
+    private sealed record NumberRead(string? Value, bool LowConfidence, int QuarterTurns, double Skew);
 }

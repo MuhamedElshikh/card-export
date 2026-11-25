@@ -35,16 +35,8 @@ public static class DependencyInjection
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
         services.AddSingleton<IImageStore, EncryptedImageStore>();
 
-        var tessdataPath = configuration["Ocr:TessdataPath"];
-        if (string.IsNullOrWhiteSpace(tessdataPath))
-        {
-            tessdataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
-        }
-
-        var maxConcurrentScans = configuration.GetValue("Ocr:MaxConcurrentScans", 1);
-
-        services.AddSingleton<IIdCardOcrService>(_ =>
-            new TesseractIdCardOcrService(tessdataPath!, maxConcurrentScans));
+        services.Configure<TesseractOptions>(configuration.GetSection(TesseractOptions.SectionName));
+        services.AddSingleton<IIdCardOcrService, TesseractIdCardOcrService>();
 
         return services;
     }

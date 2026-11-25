@@ -6,8 +6,8 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
 - [x] `NationalIdNumber` parser: Arabic-Indic + Persian digit normalization, 14 digits, century digit,
       YYMMDD real-date and not-in-future checks, governorate codes 01-04/11-20/22-29/31-35/88, gender.
 - [x] `NationalIdResult` derived fields.
-- [x] Bundled offline Arabic LSTM model (`ara.traineddata`, 2.4 MB).
-- [x] `TesseractIdCardOcrService` with 3 passes + majority vote + low-confidence flag.
+- [x] Bundled offline LSTM models (`ara.traineddata` 2.4 MB + `eng.traineddata` 4.1 MB).
+- [x] `TesseractIdCardOcrService` with digit whitelists + majority vote + low-confidence flag.
 - [x] Parser tests (19 application tests green).
 
 ## Phase 2 — API + database
@@ -18,7 +18,7 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
 - [x] `GET /api/idcards` (paged + search), `GET /api/idcards/{id}`.
 - [x] ProblemDetails with translatable `code` for every failure path.
 - [x] AES-GCM image store behind `Storage:StoreImage` (default off).
-- [x] Tests: 19 application + 5 infrastructure + 12 API = 36 green.
+- [x] Tests: 19 application + 5 infrastructure + 12 API = 36 green at that milestone.
 - [x] Verified live: HTTP create/list/get against LocalDB, scan returns 200 with
       `nationalId=null, lowConfidence=true` for a blank image (no fabricated data).
 
@@ -45,7 +45,22 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
 - [x] `Tools/IdCards.Eval` console harness (accuracy, lowConfidence share, avg/p95 latency, peak RAM).
 - [ ] Real accuracy/latency/RAM numbers: waiting for the user's own ID images.
 
+## Phase 6 — OCR accuracy fix (user reported wrong data / no number)
+- [x] SkiaSharp 2.88.9 (MIT, Windows + Linux native assets) added for offline image preparation.
+- [x] `ImagePreprocessor`: EXIF orientation, long-edge scaling, grayscale, contrast stretch,
+      local-mean + Otsu binarisation, projection-profile deskew, arbitrary and quarter-turn rotation.
+- [x] `DigitCandidates`: digit-group handling, Arabic-Indic/Persian normalisation, sliding windows,
+      document fallback, majority vote and low-confidence rules.
+- [x] `ArabicTextFields`: strict name/address filtering (labels stripped, garbage rejected).
+- [x] `TesseractIdCardOcrService` rewritten: 4 orientations with early exit, `eng` + `ara` passes,
+      pooled engines, per-scan temp directory cleaned in `finally`, PII-free diagnostic logs.
+- [x] `200` mapped to `invalid_image` when a JPEG/PNG payload cannot be decoded.
+- [x] Tests: 19 application + 12 API + 43 infrastructure = **74 green, 0 warnings**.
+- [x] Real-engine integration test on generated typography fixtures: upright number and sideways
+      photo both extract `29001011234567`; blank paper yields no number.
+- [ ] Real-photo accuracy/latency/RAM figures still need the user's own images.
+
 ## Known gaps (honest list)
 - Card contour detection + perspective correction is not implemented (no usable OpenCV binding on net8).
-- Per-field crops from a JSON layout template are not implemented; the whole image is OCR'd.
+- Per-field crops from a JSON layout template are not implemented; whole-image OCR is used.
 - No measured accuracy numbers yet: the harness exists, the images must come from the user.

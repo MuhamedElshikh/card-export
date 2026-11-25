@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using IdCardReader.Application;
 using IdCardReader.Infrastructure;
+using Microsoft.Extensions.Options;
 
 return await EvalProgram.RunAsync(args);
 
@@ -69,7 +70,12 @@ internal static class EvalProgram
         Console.WriteLine($"Concurrency : 1 (low end profile)");
         Console.WriteLine();
 
-        var service = new TesseractIdCardOcrService(tessdataPath, maxConcurrentScans: 1);
+        var service = new TesseractIdCardOcrService(
+            Options.Create(new TesseractOptions
+            {
+                TessdataPath = tessdataPath,
+                MaxConcurrentScans = 1
+            }));
 
         var baseline = Process.GetCurrentProcess().WorkingSet64;
         long peakWorkingSet = baseline;

@@ -3,6 +3,7 @@ using FluentValidation;
 using FluentValidation.Results;
 using IdCardReader.Application;
 using IdCardReader.Application.IdCards;
+using IdCardReader.Infrastructure.Imaging;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -92,6 +93,14 @@ public sealed class IdCardsController : ControllerBase
         {
             _logger.LogInformation("ID card scan cancelled by the client.");
             return ApiProblem(StatusCodes.Status499ClientClosedRequest, "scan_cancelled", "The request was cancelled.");
+        }
+        catch (ImageDecodeException)
+        {
+            _logger.LogWarning("ID card scan rejected: the image could not be decoded.");
+            return ApiProblem(
+                StatusCodes.Status400BadRequest,
+                "invalid_image",
+                "The image could not be decoded. Please upload a clear JPEG or PNG photo.");
         }
         catch (Exception ex)
         {

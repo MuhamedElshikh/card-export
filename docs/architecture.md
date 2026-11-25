@@ -66,28 +66,47 @@ Migration: `Infrastructure/Persistence/Migrations/*_InitialCreate.cs`.
 `Database:Provider=Sqlite` exists for local/dev and tests only; SQL Server uses real migrations,
 SQLite builds the schema from the model (`EnsureCreated`).
 
-## OCR pipeline
+## OCR pipeline (v2)
 
 `TesseractIdCardOcrService` (offline, no network, no GPU):
 
-1. Accepts only real JPEG/PNG payloads (magic bytes checked before the engine is touched).
-2. Runs three passes on the same image with the bundled Arabic LSTM model:
-   free text (PSM 6), digit-restricted (PSM 6), digit-restricted sparse (PSM 11).
-3. Extracts every 14-digit window, keeps only candidates that pass domain validation.
-4. Majority vote: winner needs >= 60 % of votes **and** at least one direct read; otherwise
-   `lowConfidence=true`. Sliding windows inside a longer digit run are treated as the fallback path.
-5. Name/address come from the free-text pass, label-stripped and de-duplicated; they are always
-   user-editable because OCR of Arabic handwriting-style fonts is best effort.
-6. Concurrency is bounded by `SemaphoreSlim(Ocr:MaxConcurrentScans)` (default 1) so a dual-core box
-   does not thrash.
+1. The API checks JPEG/PNG magic bytes and the 5 MB limit before OCR is invoked.
+2. `ImagePreprocessor` decodes with SkiaSharp, applies EXIF orientation, scales to
+   `Ocr:NumberLongEdge` (1100 px; tiny images are raised to at least 900 px), converts to grayscale
+   with BT.601 luma, and stretches the histogram between the 1st and 99th percentile.
+3. A projection-profile search removes small text skew. It returns 0 when the image has no dominant
+   horizontal direction (a sideways photo), because rotating then would add skew instead of removing it.
+4. The number search tries orientations 0°, 180°, 90°, 270° on a local-mean binarised image
+   (tolerates shadows and uneven light), then 0°/180° with a global Otsu threshold if nothing
+   convincing was found. Each orientation is read twice: `eng` with a Western-digit whitelist
+   (much better at printed digits) and `ara` with Western plus Arabic-Indic digits. The search
+   stops as soon as two direct passes agree.
+5. `DigitCandidates` ignores spaces between printed digit groups, normalises Arabic-Indic/Persian
+   digits, keeps only domain-valid 14-digit values and votes among them. The winner needs >= 60 %
+   of the votes **and** at least one direct read; sliding windows inside a noise run and lines
+   joined by the fallback are flagged `lowConfidence=true`.
+6. Name/address are read once at `Ocr:TextLongEdge` (1800 px) on the winning orientation with the
+   Arabic model (Auto layout, SparseText retry). `ArabicTextFields` removes printed labels and
+   rejects symbol/digit soup: an empty field is better than a wrong one. Both stay user-editable.
+7. Tesseract engines are pooled and leased, never created per request. Concurrency is bounded by
+   `SemaphoreSlim(Ocr:MaxConcurrentScans)` (default 1) so a dual-core box does not thrash.
+8. Intermediate PNGs live in a unique temp directory deleted in a `finally` block. Scan logs record
+   vote count, share, rotation, skew and pass count only — never names, addresses, numbers or bytes.
+
+**Still not implemented:** card contour detection and perspective warp. They need a contour/Hough
+pipeline that no usable net8.0 binding provides here. Photographs where the card occupies only a
+small part of the frame still rely on whole-image OCR.
 
 ## Decisions and deviations
 
 | Decision | Reason |
 | --- | --- |
-| OpenCvSharp not used | only `OpenCvSharp` 2.4.0.1 is on NuGet and targets .NET Framework; `Mat` is unusable on net8.0. Card contour detection / perspective warp is therefore **not implemented** — the service reads the whole image. |
+| OpenCvSharp not used | only `OpenCvSharp` 2.4.0.1 is on NuGet and targets .NET Framework; `Mat` is unusable on net8.0. Card contour detection / perspective warp is therefore **not implemented**. SkiaSharp handles EXIF, scaling, grayscale, contrast, binarisation, deskew and rotation instead. |
 | No AutoMapper | 13.0.1 carries three high severity advisories (GHSA-6vhm-j9h7-f9gh, GHSA-gpwp-5797-mjff, GHSA-rvv3-g6hj-g44x) and 15+ is commercially licensed. A single explicit mapper is used instead. |
 | No Ardalis.Specification | the query surface is one filtered, ordered, paged read; a specification layer would add a dependency without removing any complexity. |
-| `EngineMode.LstmOnly` | the bundled `ara.traineddata` (tessdata_fast) has no legacy components, OEM 3 fails to load it. |
+| SkiaSharp 2.88.9 | MIT licensed, Windows + Linux native assets, no fontconfig needed (`NativeAssets.Linux.NoDependencies`). ImageSharp 2.1 is Apache-2.0 but has decoder advisories, 3.x changes licence; System.Drawing.Common is Windows-only. |
+| Bundled `eng.traineddata` | tessdata_fast English model (~4.1 MB) reads printed Western digits far better than the Arabic LSTM model; the Arabic model is still used for Arabic-Indic digits and all text. Both ship offline. |
+| `EngineMode.LstmOnly` | both bundled models are tessdata_fast with no legacy components, so OEM 3 fails to load them. |
+| Pooled engines | creation and model loading cost hundreds of milliseconds; engines are leased from a small pool instead of being rebuilt for each scan. Tesseract engines are not thread safe. |
 | Images off by default | `Storage:StoreImage=false`. When enabled, AES-256-GCM blobs are written outside the web root and only an opaque reference is stored. |
-| Logs contain no PII | scan logs record duration, `NationalIdFound` and `LowConfidence` only — never names, addresses, numbers or image bytes. |
+| Logs contain no PII | scan logs record duration, vote count, winner share, direct-read flag, rotation, skew, pass count, `NationalIdFound` and `LowConfidence` only — never names, addresses, numbers or image bytes. |

@@ -122,6 +122,21 @@ namespace IdCardReader.Domain
         public string GetGovernorateArabic() => _governorateLookup.TryGetValue(GovernorateCode, out var result) ? result.arabic : "Unknown";
 
         /// <summary>
+        /// Non-throwing variant of <see cref="Create"/>; returns null when the value is not a valid ID.
+        /// </summary>
+        public static NationalIdNumber? TryCreate(string? raw)
+        {
+            try
+            {
+                return Create(raw ?? string.Empty);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Creates a NationalIdNumber from a raw string, normalizing digits and validating.
         /// </summary>
         /// <param name="raw">The raw national ID number (may contain Arabic-Indic or Persian digits)</param>

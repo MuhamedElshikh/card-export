@@ -41,3 +41,28 @@ string as a real value, so `Path.GetFullPath("")` threw while the singleton stor
 **Cause:** the original lookup table had mojibake/English mixed into Arabic values
 (`دمietta`, `بني Suef`, `الفيمية`).
 **Fix:** replaced with the correct Arabic names and updated the assertion in the parser test.
+
+## 9. "Data completely wrong and no national ID" on real card photos
+**Symptom:** the user uploaded a photo; the preview had no national ID and the name/address were
+text taken from the background.
+**Causes (all in the v1 OCR pipeline):**
+- the whole image was OCR'd with no EXIF orientation, scaling, contrast, binarisation or deskew;
+- the Arabic LSTM model was used for digits, although the English model is much better at them;
+- the digit runs were split by the spaces that Egyptian cards print between digit groups, so no
+  14-digit run ever reached the validator;
+- `PageSegMode.SingleBlock` assumed one uniform text block, which a photo of a card is not;
+- name/address accepted any line with two letters, so background noise became data.
+**Fix:** the v2 pipeline in `TesseractIdCardOcrService` + `Imaging/*`: SkiaSharp preprocessing,
+skew removal, four orientations with early exit, `eng` + `ara` digit passes, whitespace-tolerant
+candidate extraction, strict name/address filtering, pooled engines. See `docs/architecture.md`.
+
+## 10. Sideways fixture produced no number after the v2 rewrite
+**Cause:** `EstimateSkewDegrees` picked the first angle when every angle scored almost equally
+(vertical text has no dominant horizontal projection), adding ~8° of skew to an already rotated image.
+**Fix:** return 0 unless the best projection score is at least 15 % above the upright baseline.
+
+## 11. `ResizeToLongEdge` upscaled every image
+**Cause:** `targetEdge` defaulted to the configured maximum instead of the image's own long edge,
+so a 200×100 image was blown up to 1600 px on every scan.
+**Fix:** keep the current size when it is smaller than the maximum, and only raise it when
+`minimumLongEdge` is set. Covered by `ImagePreprocessorTests`.
