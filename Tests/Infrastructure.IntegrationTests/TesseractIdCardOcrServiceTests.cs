@@ -1,3 +1,4 @@
+using IdCardReader.Application;
 using IdCardReader.Infrastructure;
 using IdCardReader.Infrastructure.Imaging;
 using Microsoft.Extensions.Options;
@@ -80,6 +81,51 @@ public sealed class TesseractIdCardOcrServiceTests
         Assert.True(result.LowConfidence);
         Assert.Null(result.FullName);
         Assert.Null(result.Address);
+    }
+
+    [Fact]
+    public async Task Scan_ThrowsTimeoutWhenTheBudgetIsUsedUp()
+    {
+        using var service = new TesseractIdCardOcrService(
+            Options.Create(new TesseractOptions { ScanTimeout = TimeSpan.FromTicks(1) }));
+
+        using var blank = ImagePreprocessorTests.CreateBitmap(1400, 500);
+
+        await Assert.ThrowsAsync<ScanTimeoutException>(() => service.ScanAsync(EncodePng(blank), RenderBlankBack()));
+    }
+
+    [Fact]
+    public async Task Scan_ReportsCallerCancellationAsCancellationNotTimeout()
+    {
+        using var service = CreateService();
+        using var blank = ImagePreprocessorTests.CreateBitmap(1400, 500);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.ScanAsync(EncodePng(blank), RenderBlankBack(), cancelled.Token));
+    }
+
+    [Fact]
+    public async Task Scan_RefusesWhenTheServerIsSaturated()
+    {
+        // One running scan and no waiting room: a second upload must be refused at once.
+        using var service = new TesseractIdCardOcrService(
+            Options.Create(new TesseractOptions { MaxConcurrentScans = 1, MaxQueuedScans = 0 }));
+
+        using var blank = ImagePreprocessorTests.CreateBitmap(1400, 500);
+        var bytes = EncodePng(blank);
+
+        // The first call takes its slot synchronously, before it yields.
+        var first = service.ScanAsync(bytes, RenderBlankBack());
+
+        await Assert.ThrowsAsync<ScanBusyException>(() => service.ScanAsync(bytes, bytes));
+
+        await first;
+
+        // The slot is free again once the first scan has finished.
+        var third = await service.ScanAsync(bytes, RenderBlankBack());
+        Assert.Null(third.NationalId);
     }
 
     private static TesseractIdCardOcrService CreateService()

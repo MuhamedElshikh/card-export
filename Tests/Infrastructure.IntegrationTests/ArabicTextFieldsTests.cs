@@ -68,4 +68,25 @@ public sealed class ArabicTextFieldsTests
 
         Assert.Null(name);
     }
+
+    [Fact]
+    public void Select_TakesTheLinesAfterAnUnlabelledNameAsTheAddress()
+    {
+        const string text =
+            "محمد\nعبدالفتاح عبد الواحد البهى\n٤ ح صابر عابد - سكة الوايلي\nحدائق القبة - القاهرة";
+
+        var (name, address) = ArabicTextFields.Select(text);
+
+        Assert.Equal("محمد عبدالفتاح عبد الواحد البهى", name);
+        Assert.Equal("٤ ح صابر عابد - سكة الوايلي حدائق القبة - القاهرة", address);
+    }
+
+    [Fact]
+    public void Select_DoesNotInventAnAddressWhenThereIsNoName()
+    {
+        var (name, address) = ArabicTextFields.Select("حدائق القبة - القاهرة");
+
+        Assert.Null(name);
+        Assert.Null(address);
+    }
 }

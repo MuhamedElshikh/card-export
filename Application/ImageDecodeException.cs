@@ -1,4 +1,4 @@
-namespace IdCardReader.Infrastructure.Imaging;
+namespace IdCardReader.Application;
 
 /// <summary>
 /// The uploaded bytes passed the magic byte check but could not be decoded as an image,

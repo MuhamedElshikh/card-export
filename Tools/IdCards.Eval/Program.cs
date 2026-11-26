@@ -2,7 +2,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using IdCardReader.Application;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using IdCardReader.Infrastructure;
+using IdCardReader.Infrastructure.Imaging;
+using SkiaSharp;
 using Microsoft.Extensions.Options;
 
 return await EvalProgram.RunAsync(args);
@@ -22,6 +26,11 @@ internal static class EvalProgram
         {
             PrintUsage();
             return 1;
+        }
+
+        if (args[0] == "--export-glyphs")
+        {
+            return ExportGlyphs(args);
         }
 
         var folder = args[0];
@@ -188,6 +197,70 @@ internal static class EvalProgram
             $"Memory                    : peak working set {peakMb:F0} MB " +
             $"(baseline {baselineMb:F0} MB, delta {peakMb - baselineMb:F0} MB)");
 
+        return 0;
+    }
+
+    /// <summary>
+    /// Adds digit templates from one card photo whose 14 digit number you type in.
+    /// Only 28x28 glyph bitmaps are written (no name, address or photo).
+    /// Usage: IdCards.Eval --export-glyphs photo.jpg 29001011234567 glyph-templates.json
+    /// </summary>
+    private static int ExportGlyphs(string[] args)
+    {
+        if (args.Length != 4 || args[2].Length != 14 || !args[2].All(char.IsAsciiDigit) || !File.Exists(args[1]))
+        {
+            Console.Error.WriteLine("Usage: IdCards.Eval --export-glyphs <photo> <14 digit number> <templates.json>");
+            return 1;
+        }
+
+        using var decoded = ImagePreprocessor.DecodeWithOrientation(File.ReadAllBytes(args[1]));
+        if (decoded is null)
+        {
+            Console.Error.WriteLine("The image could not be decoded.");
+            return 1;
+        }
+
+        using var small = ImagePreprocessor.ResizeToLongEdge(decoded, 1100, minimumLongEdge: 900);
+        using var gray = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(small));
+        using var sharp = ImagePreprocessor.Sharpen(gray);
+        using var binary = ImagePreprocessor.BinarizeLocalMean(sharp);
+
+        var ink = new bool[binary.Width * binary.Height];
+        var pixels = binary.GetPixelSpan();
+        for (var y = 0; y < binary.Height; y++)
+        {
+            for (var x = 0; x < binary.Width; x++)
+            {
+                ink[(y * binary.Width) + x] = pixels[(y * binary.RowBytes) + x] < 128;
+            }
+        }
+
+        var components = GlyphDigitReader.FindComponents(ink, binary.Width, binary.Height);
+        var rows = GlyphDigitReader.FindNumberRows(components, binary.Width, binary.Height);
+        if (rows.Count == 0)
+        {
+            Console.Error.WriteLine("No row of exactly 14 glyphs was found. Use a sharper, upright photo.");
+            return 1;
+        }
+
+        Console.WriteLine($"Found {rows.Count} candidate row(s). Using the first; check the output with a test scan.");
+        var row = rows[0];
+        var lineHeight = row.Max(component => component.Height);
+
+        var root = File.Exists(args[3])
+            ? JsonNode.Parse(File.ReadAllText(args[3]))!.AsObject()
+            : new JsonObject { ["size"] = GlyphDigitReader.GlyphSize, ["templates"] = new JsonArray() };
+        var templates = root["templates"]!.AsArray();
+
+        for (var i = 0; i < row.Count; i++)
+        {
+            var features = GlyphDigitReader.Features(GlyphDigitReader.ToMask(row[i], ink, binary.Width), lineHeight);
+            var bytes = features.Select(value => (byte)Math.Clamp((int)Math.Round(value * 255), 0, 255)).ToArray();
+            templates.Add(new JsonObject { ["d"] = args[2][i].ToString(), ["v"] = Convert.ToBase64String(bytes) });
+        }
+
+        File.WriteAllText(args[3], root.ToJsonString());
+        Console.WriteLine($"Wrote {row.Count} templates to {args[3]} ({templates.Count} in total).");
         return 0;
     }
 

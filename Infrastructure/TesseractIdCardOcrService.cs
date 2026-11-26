@@ -39,9 +39,12 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
     private readonly TesseractOptions _options;
     private readonly ILogger<TesseractIdCardOcrService> _logger;
     private readonly SemaphoreSlim _scanSemaphore;
+    private readonly ScanGate _scanGate;
+    private readonly TimeSpan _scanTimeout;
     private readonly TesseractEnginePool _arabicPool;
     private readonly TesseractEnginePool _englishPool;
     private readonly PaddleOcrNumberReader _paddleOcr = new();
+    private readonly GlyphDigitReader _glyphReader = GlyphDigitReader.LoadDefault();
 
     /// <summary>Creates the service.</summary>
     public TesseractIdCardOcrService(
@@ -68,9 +71,13 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
 
         var concurrency = Math.Max(1, _options.MaxConcurrentScans);
         _scanSemaphore = new SemaphoreSlim(concurrency, concurrency);
+        _scanGate = new ScanGate(concurrency + Math.Max(0, _options.MaxQueuedScans));
+        _scanTimeout = _options.ScanTimeout > TimeSpan.Zero ? _options.ScanTimeout : Timeout.InfiniteTimeSpan;
     }
 
     /// <inheritdoc />
+    /// <exception cref="ScanBusyException">Too many scans are already running or waiting.</exception>
+    /// <exception cref="ScanTimeoutException">The scan used up its time budget.</exception>
     public async Task<IdCardScanResult> ScanAsync(
         byte[] frontImageBytes,
         byte[] backImageBytes,
@@ -79,18 +86,43 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         ArgumentNullException.ThrowIfNull(frontImageBytes);
         ArgumentNullException.ThrowIfNull(backImageBytes);
 
-        await _scanSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Refuse straight away when the server is saturated; waiting minutes helps nobody.
+        if (!_scanGate.TryEnter())
+        {
+            throw new ScanBusyException();
+        }
+
         try
         {
-            // Tesseract is synchronous and CPU bound; keep it off the request thread.
-            return await Task.Run(
-                    () => Scan(frontImageBytes, backImageBytes, cancellationToken),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            await _scanSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // The budget starts when the scan starts running, not while it waits for a slot.
+                using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                budget.CancelAfter(_scanTimeout);
+
+                try
+                {
+                    // Tesseract is synchronous and CPU bound; keep it off the request thread.
+                    return await Task.Run(
+                            () => Scan(frontImageBytes, backImageBytes, budget.Token),
+                            budget.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested)
+                {
+                    throw new ScanTimeoutException(_scanTimeout);
+                }
+            }
+            finally
+            {
+                _scanSemaphore.Release();
+            }
         }
         finally
         {
-            _scanSemaphore.Release();
+            _scanGate.Exit();
         }
     }
 
@@ -106,7 +138,13 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
 
         try
         {
-            var number = ReadNationalId(front, workDirectory, cancellationToken);
+            // The printed number uses a decorative Arabic-Indic font Tesseract cannot read, so both
+            // sides are first matched glyph by glyph. Agreement of the two sides skips the slow passes.
+            var frontGlyph = TryReadGlyphNumber(front, cancellationToken);
+            var backGlyph = TryReadGlyphNumber(back, cancellationToken);
+            var number = frontGlyph is { } f && backGlyph is { } b && f.Value == b.Value
+                ? new NumberRead(f.Value, LowConfidence: false, f.QuarterTurns, f.Skew)
+                : ReadNationalId(front, workDirectory, SeedVotes(frontGlyph, backGlyph), frontGlyph, cancellationToken);
             var (name, address) = ReadText(front, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
             var backFields = ReadBackFields(back, workDirectory, cancellationToken);
 
@@ -133,7 +171,57 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         return decoded ?? throw new ImageDecodeException("The uploaded ID card image could not be decoded.");
     }
 
-    private NumberRead ReadNationalId(SKBitmap decoded, string workDirectory, CancellationToken cancellationToken)
+    private static List<DigitCandidates.Candidate> SeedVotes(GlyphRead? front, GlyphRead? back)
+    {
+        var votes = new List<DigitCandidates.Candidate>();
+        if (front is { } f)
+        {
+            votes.Add(new DigitCandidates.Candidate(f.Value, true, "glyph-front"));
+        }
+
+        if (back is { } b)
+        {
+            votes.Add(new DigitCandidates.Candidate(b.Value, true, "glyph-back"));
+        }
+
+        return votes;
+    }
+
+    private GlyphRead? TryReadGlyphNumber(SKBitmap decoded, CancellationToken cancellationToken)
+    {
+        if (!_glyphReader.HasTemplates)
+        {
+            return null;
+        }
+
+        using var small = ImagePreprocessor.ResizeToLongEdge(decoded, _options.NumberLongEdge, minimumLongEdge: 900);
+        using var grayscale = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(small));
+        using var probe = ImagePreprocessor.ResizeToLongEdge(grayscale, 420);
+        var skew = ImagePreprocessor.EstimateSkewDegrees(probe);
+        using var deskewed = skew == 0 ? grayscale.Copy(SKColorType.Gray8) : ImagePreprocessor.Rotate(grayscale, skew);
+        using var sharpened = ImagePreprocessor.Sharpen(deskewed);
+
+        foreach (var turns in OrientationOrder)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using var oriented = ImagePreprocessor.RotateQuarterTurns(sharpened, turns);
+            using var binarized = ImagePreprocessor.BinarizeLocalMean(oriented);
+            if (_glyphReader.Read(binarized) is { } read)
+            {
+                return new GlyphRead(read.Value, turns, skew);
+            }
+        }
+
+        return null;
+    }
+
+    private NumberRead ReadNationalId(
+        SKBitmap decoded,
+        string workDirectory,
+        List<DigitCandidates.Candidate> seedVotes,
+        GlyphRead? frontGlyph,
+        CancellationToken cancellationToken)
     {
         using var small = ImagePreprocessor.ResizeToLongEdge(
             decoded,
@@ -148,8 +236,16 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             : ImagePreprocessor.Rotate(grayscale, skew);
         using var sharpened = ImagePreprocessor.Sharpen(deskewed);
 
-        var votes = new List<DigitCandidates.Candidate>();
+        var votes = new List<DigitCandidates.Candidate>(seedVotes);
         var byOrientation = new Dictionary<int, List<DigitCandidates.Candidate>>();
+        if (frontGlyph is { } seeded)
+        {
+            byOrientation[seeded.QuarterTurns] = new List<DigitCandidates.Candidate>
+            {
+                new(seeded.Value, true, "glyph-front")
+            };
+        }
+
         var passes = 0;
         var recognizedAnyDigits = false;
 
@@ -165,7 +261,15 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
                     cancellationToken,
                     out var recognizedDigits);
                 votes.AddRange(read);
-                byOrientation[turns] = read;
+                if (byOrientation.TryGetValue(turns, out var seededRead))
+                {
+                    seededRead.AddRange(read);
+                }
+                else
+                {
+                    byOrientation[turns] = read;
+                }
+
                 recognizedAnyDigits |= recognizedDigits;
 
                 if (DigitCandidates.HasStrongWinner(votes))
@@ -531,6 +635,8 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         _englishPool.Dispose();
         _paddleOcr.Dispose();
     }
+
+    private sealed record GlyphRead(string Value, int QuarterTurns, double Skew);
 
     private sealed record NumberRead(string? Value, bool LowConfidence, int QuarterTurns, double Skew);
 }

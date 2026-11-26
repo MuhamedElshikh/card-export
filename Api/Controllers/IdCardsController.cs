@@ -3,7 +3,6 @@ using FluentValidation;
 using FluentValidation.Results;
 using IdCardReader.Application;
 using IdCardReader.Application.IdCards;
-using IdCardReader.Infrastructure.Imaging;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -104,6 +103,24 @@ public sealed class IdCardsController : ControllerBase
         {
             _logger.LogInformation("ID card scan cancelled by the client.");
             return ApiProblem(StatusCodes.Status499ClientClosedRequest, "scan_cancelled", "The request was cancelled.");
+        }
+        catch (ScanBusyException)
+        {
+            _logger.LogWarning("ID card scan refused: the OCR engine is saturated.");
+            Response.Headers.RetryAfter = "5";
+            return ApiProblem(
+                StatusCodes.Status503ServiceUnavailable,
+                "scan_busy",
+                "The server is busy reading other cards. Try again in a moment.");
+        }
+        catch (ScanTimeoutException)
+        {
+            stopwatch.Stop();
+            _logger.LogWarning("ID card scan timed out after {ElapsedMs} ms.", stopwatch.ElapsedMilliseconds);
+            return ApiProblem(
+                StatusCodes.Status504GatewayTimeout,
+                "scan_timeout",
+                "Reading the card took too long. Try a smaller or clearer photo.");
         }
         catch (ImageDecodeException)
         {
