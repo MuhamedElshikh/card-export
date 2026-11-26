@@ -17,6 +17,8 @@ export const EN = {
     change: 'Change image',
     hint: 'JPG or PNG — 5 MB maximum',
     scanning: 'Reading the card…',
+    cancel: 'Cancel',
+    takePhoto: 'Take a photo',
     review: 'Review and correct the data',
     reviewHint: 'Name and address are best-effort OCR, edit them as needed. The national ID is the source of truth and every derived field is computed from it.',
     newScan: 'Scan another card',

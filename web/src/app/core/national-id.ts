@@ -32,7 +32,7 @@ export const GOVERNORATES: Readonly<Record<string, Governorate>> = {
   '17': { english: 'Monufia', arabic: 'المنوفية' },
   '18': { english: 'Beheira', arabic: 'البحيرة' },
   '19': { english: 'Ismailia', arabic: 'الإسماعيلية' },
-  '20': { english: 'Giza', arabic: 'الجيزة' },
+  '21': { english: 'Giza', arabic: 'الجيزة' },
   '22': { english: 'Beni Suef', arabic: 'بني سويف' },
   '23': { english: 'Fayoum', arabic: 'الفيوم' },
   '24': { english: 'Minya', arabic: 'المنيا' },

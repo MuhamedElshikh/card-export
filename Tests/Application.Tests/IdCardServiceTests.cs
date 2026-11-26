@@ -33,6 +33,34 @@ public sealed class IdCardServiceTests
     }
 
     [Fact]
+    public async Task CreateAsync_WithGizaNationalId_StoresGizaGovernorate()
+    {
+        var repository = new FakeIdCardRepository();
+        var service = CreateService(repository);
+
+        var result = await service.CreateAsync(
+            new SaveIdCardRequest("29001012134567", "TEST SUBJECT", "TEST ADDRESS", LowConfidence: false));
+
+        Assert.Equal(CreateIdCardStatus.Created, result.Status);
+        Assert.Equal("21", result.IdCard!.GovernorateCode);
+        Assert.Equal("Giza", result.IdCard.GovernorateEnglish);
+        Assert.Equal("الجيزة", result.IdCard.GovernorateArabic);
+    }
+
+    [Fact]
+    public async Task CreateAsync_WithUnknownGovernorateCode_ReturnsInvalidStatus()
+    {
+        var repository = new FakeIdCardRepository();
+        var service = CreateService(repository);
+
+        var result = await service.CreateAsync(
+            new SaveIdCardRequest("29001019934567", "TEST SUBJECT", "TEST ADDRESS", LowConfidence: false));
+
+        Assert.Equal(CreateIdCardStatus.InvalidNationalId, result.Status);
+        Assert.Empty(repository.Cards);
+    }
+
+    [Fact]
     public async Task CreateAsync_WithArabicIndicDigits_NormalizesAndStores()
     {
         var repository = new FakeIdCardRepository();

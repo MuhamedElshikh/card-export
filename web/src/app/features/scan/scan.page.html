@@ -18,6 +18,19 @@
       aria-label="{{ 'scan.choose' | translate }}" />
   </label>
 
+  <div class="actions actions--tight">
+    <label class="ghost-button camera-button" [class.is-disabled]="scanning()">
+      {{ 'scan.takePhoto' | translate }}
+      <input
+        type="file"
+        accept="image/*"
+        capture="environment"
+        [disabled]="scanning()"
+        (change)="onFileSelected($event)"
+        aria-label="{{ 'scan.takePhoto' | translate }}" />
+    </label>
+  </div>
+
   @if (previewUrl(); as preview) {
     <div class="preview">
       <img [src]="preview" alt="{{ 'scan.heading' | translate }}" />
@@ -27,6 +40,7 @@
   @if (scanning()) {
     <p class="muted scanning">
       <span class="spinner" aria-hidden="true"></span>{{ 'scan.scanning' | translate }}
+      <button type="button" class="ghost-button" (click)="cancelScan()">{{ 'scan.cancel' | translate }}</button>
     </p>
   }
 

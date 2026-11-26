@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
+import { Subscription } from 'rxjs';
 import { IdCardApiService, errorCodeOf } from '../../core/idcard-api.service';
+import { prepareImage } from '../../core/image-prepare';
 import { LanguageService } from '../../core/language.service';
 import { DerivedInfo, parseNationalId } from '../../core/national-id';
 
@@ -14,6 +16,10 @@ import { DerivedInfo, parseNationalId } from '../../core/national-id';
 export class ScanPage {
   private readonly api = inject(IdCardApiService);
   private readonly destroyRef = inject(DestroyRef);
+
+  /** Identifies the scan that is allowed to deliver results; bumping it abandons older scans. */
+  private scanRun = 0;
+  private scanSubscription: Subscription | null = null;
 
   readonly language = inject(LanguageService);
 
@@ -36,7 +42,10 @@ export class ScanPage {
   );
 
   constructor() {
-    this.destroyRef.onDestroy(() => this.releasePreview());
+    this.destroyRef.onDestroy(() => {
+      this.abandonScan();
+      this.releasePreview();
+    });
   }
 
   onFileSelected(event: Event): void {
@@ -49,6 +58,16 @@ export class ScanPage {
     }
 
     this.startScan(file);
+  }
+
+  /** Stops the scan in progress. The in-flight request is aborted and the preview is kept. */
+  cancelScan(): void {
+    if (!this.scanning()) {
+      return;
+    }
+
+    this.abandonScan();
+    this.scanning.set(false);
   }
 
   onNationalIdInput(event: Event): void {
@@ -96,6 +115,8 @@ export class ScanPage {
   }
 
   reset(): void {
+    this.abandonScan();
+    this.scanning.set(false);
     this.releasePreview();
     this.previewUrl.set(null);
     this.nationalId.set('');
@@ -113,28 +134,45 @@ export class ScanPage {
   }
 
   private startScan(file: File): void {
+    this.abandonScan();
     this.releasePreview();
     this.errorCode.set(null);
     this.savedId.set(null);
     this.previewUrl.set(URL.createObjectURL(file));
     this.scanning.set(true);
 
-    this.api.scan(file).subscribe({
-      next: (result) => {
-        this.scanning.set(false);
-        this.showForm.set(true);
-        this.nationalId.set(result.nationalId ?? '');
-        this.fullName.set(result.fullName ?? '');
-        this.address.set(result.address ?? '');
-        this.lowConfidence.set(result.lowConfidence);
-        this.nationalIdTouched.set(true);
-      },
-      error: (error: unknown) => {
-        this.scanning.set(false);
-        this.showForm.set(true);
-        this.errorCode.set(errorCodeOf(error));
-      },
+    const run = ++this.scanRun;
+
+    // Large phone photos are shrunk in the browser first; the original is used if that fails.
+    void prepareImage(file).then((prepared) => {
+      if (run !== this.scanRun) {
+        return;
+      }
+
+      this.scanSubscription = this.api.scan(prepared).subscribe({
+        next: (result) => {
+          this.scanning.set(false);
+          this.showForm.set(true);
+          this.nationalId.set(result.nationalId ?? '');
+          this.fullName.set(result.fullName ?? '');
+          this.address.set(result.address ?? '');
+          this.lowConfidence.set(result.lowConfidence);
+          this.nationalIdTouched.set(true);
+        },
+        error: (error: unknown) => {
+          this.scanning.set(false);
+          this.showForm.set(true);
+          this.errorCode.set(errorCodeOf(error));
+        },
+      });
     });
+  }
+
+  /** Invalidates the current scan and aborts its HTTP request, if one was started. */
+  private abandonScan(): void {
+    this.scanRun++;
+    this.scanSubscription?.unsubscribe();
+    this.scanSubscription = null;
   }
 
   private releasePreview(): void {
