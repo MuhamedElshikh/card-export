@@ -9,6 +9,18 @@ public sealed class TesseractOptions
     /// <summary>Maximum number of scans processed at the same time (1 on dual core machines).</summary>
     public int MaxConcurrentScans { get; set; } = 1;
 
+    /// <summary>
+    /// How many more scans may wait for a free slot while <see cref="MaxConcurrentScans"/> are running.
+    /// Further uploads are refused at once (HTTP 503) instead of queueing without limit.
+    /// </summary>
+    public int MaxQueuedScans { get; set; } = 4;
+
+    /// <summary>
+    /// Time budget for reading one card, counted from when its scan starts running. The budget is
+    /// checked between OCR passes, so a scan can overshoot by at most one pass. Zero disables it.
+    /// </summary>
+    public TimeSpan ScanTimeout { get; set; } = TimeSpan.FromSeconds(90);
+
     /// <summary>Directory holding the bundled traineddata files. Empty means next to the executable.</summary>
     public string? TessdataPath { get; set; }
 

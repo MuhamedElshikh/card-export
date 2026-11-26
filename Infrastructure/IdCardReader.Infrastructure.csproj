@@ -25,6 +25,7 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="2.88.9" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <None Include="tessdata\*.traineddata" CopyToOutputDirectory="Always" />
+    <EmbeddedResource Include="Imaging\glyph-templates.json" LogicalName="glyph-templates.json" />
   </ItemGroup>
 
   <ItemGroup>

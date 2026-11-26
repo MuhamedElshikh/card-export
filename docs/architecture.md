@@ -80,7 +80,17 @@ SQLite builds the schema from the model (`EnsureCreated`).
    deskews and sharpens. This sequence runs for both images on every scan.
 3. A projection-profile search removes small text skew. It returns 0 when the image has no dominant
    horizontal direction (a sideways photo), because rotating then would add skew instead of removing it.
-4. The number search tries orientations 0°, 180°, 90°, 270° on a local-mean binarised image
+4. **Glyph reader (first):** the card prints the number in a decorative Arabic-Indic font (dot-shaped
+   zeros) that the stock Tesseract models cannot read. `GlyphDigitReader` finds a row of exactly 14
+   components in the binarised image, normalises each glyph and matches it against the template bank
+   `Infrastructure/Imaging/glyph-templates.json` (nearest neighbour, position priors for century,
+   month and day digits, distance limits, domain validation). Front and back are both read; when they
+   agree the Tesseract/PP-OCR number passes are skipped. A single glyph read is only a vote.
+   Add templates from your own cards with
+   `IdCards.Eval --export-glyphs photo.jpg <14 digit number> glyph-templates.json` (only 28x28 glyph
+   bitmaps are written). The seed bank has no digits 1 and 7: such glyphs are rejected and the
+   Tesseract passes below take over until templates for them are added.
+4b. The Tesseract number search tries orientations 0°, 180°, 90°, 270° on a local-mean binarised image
    (tolerates shadows and uneven light), then 0°/180° with a global Otsu threshold if nothing
    convincing was found. Each orientation is read twice: `eng` with a Western-digit whitelist
    (much better at printed digits) and `ara` with Western plus Arabic-Indic digits. The search
@@ -98,7 +108,8 @@ SQLite builds the schema from the model (`EnsureCreated`).
    Arabic model (Auto layout, SparseText retry). `ArabicTextFields` strips the **whole** label
    (including `بالكامل`, which otherwise becomes the "name"), requires at least two name tokens,
    rejects card headings and common address markers, and can join a preceding single name token to
-   an unlabelled name line. Address still requires a recognized label. Both stay user-editable.
+   an unlabelled name line. Cards without labels: the one or two address-like lines after the name
+   are taken as the address. Both stay user-editable.
 7. The back is scanned at the same text resolution and orientations. `ArabicBackFields` first uses
    labels when present, then handles the unlabeled Egyptian layout: it recognizes marital status
    only from a fixed vocabulary and takes up to three consecutive text lines before that status row

@@ -84,6 +84,8 @@ export const EN = {
     image_storage_disabled: 'Image storage is disabled on this server.',
     invalid_image: 'The file is not a valid image.',
     scan_failed: 'The image could not be read. Try a clearer photo.',
+    scan_busy: 'The server is busy reading other cards. Try again in a moment.',
+    scan_timeout: 'Reading the card took too long. Try a smaller or clearer photo.',
     scan_cancelled: 'The request was cancelled.',
     id_card_not_found: 'The card does not exist.',
     network_error: 'Cannot reach the API. Make sure the backend is running.',

@@ -6,7 +6,8 @@ services:
       MSSQL_SA_PASSWORD: "${SQL_SA_PASSWORD:?set SQL_SA_PASSWORD in .env}"
       MSSQL_PID: "Express"
     ports:
-      - "1433:1433"
+      # Local tools only: never publish the database on the network.
+      - "127.0.0.1:1433:1433"
     volumes:
       - sql-data:/var/opt/mssql
     healthcheck:
@@ -31,11 +32,16 @@ services:
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__IdCardReaderDb: "Server=sqlserver,1433;Database=IdCardReaderDb;User Id=sa;Password=${SQL_SA_PASSWORD};TrustServerCertificate=True;MultipleActiveResultSets=True"
       Ocr__MaxConcurrentScans: "1"
+      # nginx (web) reaches the API from a Docker network; trust its X-Forwarded-For header.
+      ForwardedHeaders__TrustedNetworks__0: "172.16.0.0/12"
+      ForwardedHeaders__TrustedNetworks__1: "192.168.0.0/16"
+      ForwardedHeaders__TrustedNetworks__2: "10.0.0.0/8"
       Storage__StoreImage: "${STORE_IMAGE:-false}"
       Storage__EncryptionKey: "${STORAGE_ENCRYPTION_KEY:-}"
       Storage__Path: /app/App_Data/idcards
     ports:
-      - "5099:8080"
+      # The browser talks to the API through nginx; this port is only for local debugging.
+      - "127.0.0.1:5099:8080"
     volumes:
       - image-data:/app/App_Data
     restart: unless-stopped

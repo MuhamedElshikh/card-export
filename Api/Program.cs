@@ -2,6 +2,8 @@ using System.Threading.RateLimiting;
 using IdCardReader.Api;
 using IdCardReader.Application;
 using IdCardReader.Infrastructure;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,6 +14,27 @@ builder.Services.AddInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddProblemDetails();
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseHealthCheck>("database", tags: new[] { "ready" });
+
+// Behind a reverse proxy (nginx in docker-compose) every request would otherwise appear to come
+// from the proxy's address, so the per-IP rate limit would be shared by all users. Only proxies
+// in ForwardedHeaders:TrustedNetworks (CIDR notation) are believed; by default only loopback is.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+    var trusted = builder.Configuration.GetSection("ForwardedHeaders:TrustedNetworks").Get<string[]>()
+        ?? Array.Empty<string>();
+
+    foreach (var entry in trusted)
+    {
+        if (ProxyTrust.TryParseNetwork(entry, out var network))
+        {
+            options.KnownNetworks.Add(network);
+        }
+    }
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -41,6 +64,7 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+app.UseForwardedHeaders();
 app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
@@ -53,6 +77,10 @@ app.UseCors("AllowAngularApp");
 app.UseRateLimiter();
 app.MapControllers();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 
 await ApplyMigrationsAsync(app);
 

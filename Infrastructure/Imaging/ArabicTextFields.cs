@@ -83,7 +83,9 @@ public static class ArabicTextFields
             address = afterLabel.Count == 0 ? null : string.Join(" ", afterLabel);
         }
 
-        // Unlabelled Arabic text is not promoted to an address either.
+        // The current Egyptian card prints no labels: the address is the one or two lines that
+        // follow the name. Only lines that look like addresses are taken, and only after a name.
+        address ??= ReadAddressAfterName(lines, name);
 
         if (SameLine(address, name))
         {
@@ -91,6 +93,38 @@ public static class ArabicTextFields
         }
 
         return (name, address);
+    }
+
+    private static string? ReadAddressAfterName(IReadOnlyList<FieldLine> lines, string? name)
+    {
+        if (name is null)
+        {
+            return null;
+        }
+
+        var nameIndex = -1;
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var text = lines[index].Text;
+            if (text.Length > 0 && name.EndsWith(text, StringComparison.Ordinal))
+            {
+                nameIndex = index;
+            }
+        }
+
+        if (nameIndex < 0)
+        {
+            return null;
+        }
+
+        var following = lines
+            .Skip(nameIndex + 1)
+            .Where(line => !line.NameLabel && !line.AddressLabel && IsAddressLike(line.Text))
+            .Select(line => line.Text)
+            .Take(2)
+            .ToList();
+
+        return following.Count == 0 ? null : string.Join(" ", following);
     }
 
     private static string? ReadUnlabelledName(IReadOnlyList<FieldLine> lines)
