@@ -18,9 +18,4 @@ public sealed class TesseractOptions
     /// <summary>Longest edge of the image used to read the name and address.</summary>
     public int TextLongEdge { get; set; } = 1800;
 
-    /// <summary>Set to false to feed the raw grayscale image to Tesseract (diagnostics only).</summary>
-    public bool EnablePreprocessing { get; set; } = true;
-
-    /// <summary>Set to false to skip the skew estimate, which costs a few hundred milliseconds.</summary>
-    public bool EnableDeskew { get; set; } = true;
 }

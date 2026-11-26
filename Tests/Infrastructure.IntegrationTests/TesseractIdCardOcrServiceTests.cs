@@ -6,7 +6,7 @@ using SkiaSharp;
 namespace IdCardReader.Infrastructure.IntegrationTests;
 
 /// <summary>
-/// Runs the real Tesseract engine over generated typography fixtures.
+/// Runs the real Tesseract and PP-OCRv5 engines over generated typography fixtures.
 /// These are not sample ID cards and say nothing about accuracy on real photos: they only prove
 /// that the decode, preprocessing, rotation search, voting and domain validation chain works.
 /// </summary>
@@ -20,7 +20,7 @@ public sealed class TesseractIdCardOcrServiceTests
         using var service = CreateService();
         var bytes = RenderNumber();
 
-        var result = await service.ScanAsync(bytes);
+        var result = await service.ScanAsync(bytes, RenderBlankBack());
 
         Assert.Equal(Number, result.NationalId);
         Assert.True(result.NationalIdValid);
@@ -39,9 +39,22 @@ public sealed class TesseractIdCardOcrServiceTests
         using var sideways = ImagePreprocessor.RotateQuarterTurns(upright, 1);
         var bytes = EncodePng(sideways);
 
-        var result = await service.ScanAsync(bytes);
+        var result = await service.ScanAsync(bytes, RenderBlankBack());
 
         Assert.Equal(Number, result.NationalId);
+    }
+
+    [Fact]
+    public async Task Scan_UsesAlternateOcrWhenPrimaryReadIsLowConfidence()
+    {
+        using var service = CreateService();
+        var front = RenderDegradedNumber();
+
+        var result = await service.ScanAsync(front, RenderBlankBack());
+
+        Assert.Equal(Number, result.NationalId);
+        Assert.True(result.NationalIdValid);
+        Assert.True(result.LowConfidence);
     }
 
     [Fact]
@@ -49,7 +62,8 @@ public sealed class TesseractIdCardOcrServiceTests
     {
         using var service = CreateService();
 
-        await Assert.ThrowsAsync<ImageDecodeException>(() => service.ScanAsync(new byte[] { 1, 2, 3, 4 }));
+        await Assert.ThrowsAsync<ImageDecodeException>(
+            () => service.ScanAsync(new byte[] { 1, 2, 3, 4 }, new byte[] { 1, 2, 3, 4 }));
     }
 
     [Fact]
@@ -60,7 +74,7 @@ public sealed class TesseractIdCardOcrServiceTests
         using var blank = ImagePreprocessorTests.CreateBitmap(1400, 500);
         var bytes = EncodePng(blank);
 
-        var result = await service.ScanAsync(bytes);
+        var result = await service.ScanAsync(bytes, RenderBlankBack());
 
         Assert.Null(result.NationalId);
         Assert.True(result.LowConfidence);
@@ -76,6 +90,38 @@ public sealed class TesseractIdCardOcrServiceTests
     private static byte[] RenderNumber()
     {
         using var bitmap = RenderBitmap();
+        return EncodePng(bitmap);
+    }
+
+    private static byte[] RenderDegradedNumber()
+    {
+        using var original = new SKBitmap(new SKImageInfo(768, 768, SKColorType.Bgra8888, SKAlphaType.Opaque));
+
+        using (var canvas = new SKCanvas(original))
+        using (var typeface = SKTypeface.FromFamilyName("Segoe UI", SKFontStyle.Bold))
+        using (var font = new SKFont(typeface, 21))
+        using (var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true })
+        {
+            canvas.Clear(SKColors.White);
+            canvas.DrawText("2 90 01 01 12 3456 7", 20, 460, font, paint);
+            canvas.Flush();
+        }
+
+        using var lowResolution = original.Resize(
+            new SKImageInfo(256, 256, SKColorType.Bgra8888, SKAlphaType.Opaque),
+            SKFilterQuality.Low);
+        using var recompressed = lowResolution.Resize(
+            new SKImageInfo(768, 768, SKColorType.Bgra8888, SKAlphaType.Opaque),
+            SKFilterQuality.Low);
+        using var image = SKImage.FromBitmap(recompressed);
+        using var data = image.Encode(SKEncodedImageFormat.Jpeg, 25);
+
+        return data.ToArray();
+    }
+
+    private static byte[] RenderBlankBack()
+    {
+        using var bitmap = ImagePreprocessorTests.CreateBitmap(1400, 500);
         return EncodePng(bitmap);
     }
 

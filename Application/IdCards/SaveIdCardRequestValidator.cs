@@ -23,6 +23,14 @@ public sealed class SaveIdCardRequestValidator : AbstractValidator<SaveIdCardReq
             .MaximumLength(500)
             .When(x => x.Address is not null);
 
+        RuleFor(x => x.Occupation)
+            .MaximumLength(200)
+            .When(x => x.Occupation is not null);
+
+        RuleFor(x => x.MaritalStatus)
+            .MaximumLength(100)
+            .When(x => x.MaritalStatus is not null);
+
         RuleFor(x => x.ImageBase64)
             .MaximumLength(14_000_000)
             .When(x => x.ImageBase64 is not null);

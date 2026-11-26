@@ -4,7 +4,7 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
 
 ## Phase 1 — Domain + OCR spike
 - [x] `NationalIdNumber` parser: Arabic-Indic + Persian digit normalization, 14 digits, century digit,
-      YYMMDD real-date and not-in-future checks, governorate codes 01-04/11-20/22-29/31-35/88, gender.
+      YYMMDD real-date and not-in-future checks, governorate codes 01-04/11-19/21-29/31-35/88, gender.
 - [x] `NationalIdResult` derived fields.
 - [x] Bundled offline LSTM models (`ara.traineddata` 2.4 MB + `eng.traineddata` 4.1 MB).
 - [x] `TesseractIdCardOcrService` with digit whitelists + majority vote + low-confidence flag.

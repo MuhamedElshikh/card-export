@@ -26,14 +26,18 @@ describe('IdCardApiService', () => {
     http.verify();
   });
 
-  it('posts the image as multipart form data', () => {
-    const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'card.jpg', { type: 'image/jpeg' });
+  it('posts both card sides under the names accepted by the scan endpoint', () => {
+    const front = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'front.jpg', { type: 'image/jpeg' });
+    const back = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'back.jpg', { type: 'image/jpeg' });
 
-    service.scan(file).subscribe();
+    Reflect.apply(service.scan, service, [front, back]).subscribe();
 
     const request = http.expectOne('http://localhost:5099/api/idcards/scan');
     expect(request.request.method).toBe('POST');
     expect(request.request.body instanceof FormData).toBe(true);
+    const body = request.request.body as FormData;
+    expect((body.get('frontImage') as File).name).toBe('front.jpg');
+    expect((body.get('backImage') as File).name).toBe('back.jpg');
     request.flush({ nationalId: null, lowConfidence: true });
   });
 

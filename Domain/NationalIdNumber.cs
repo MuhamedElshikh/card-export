@@ -9,14 +9,15 @@ namespace IdCardReader.Domain
     /// </summary>
     public struct NationalIdNumber
     {
-        // Fixed governorate codes matching the task specification exactly:
+        // Governorate codes used in digits 8-9 of the national number:
         // 01 Cairo, 02 Alexandria, 03 Port Said, 04 Suez,
         // 11 Damietta, 12 Dakahlia, 13 Sharqia, 14 Qalyubia,
         // 15 Kafr El Sheikh, 16 Gharbia, 17 Monufia, 18 Beheira,
-        // 19 Ismailia, 20 Giza, 22 Beni Suef, 23 Fayoum,
+        // 19 Ismailia, 21 Giza, 22 Beni Suef, 23 Fayoum,
         // 24 Minya, 25 Assiut, 26 Sohag, 27 Qena,
         // 28 Aswan, 29 Luxor, 31 Red Sea, 32 New Valley,
         // 33 Matrouh, 34 North Sinai, 35 South Sinai, 88 Born abroad
+        // Note: there is no code 20 (Giza is 21).
         private static readonly (int code, string english, string arabic)[] GovernorateMap =
         {
             (1, "Cairo", "القاهرة"),
@@ -32,7 +33,7 @@ namespace IdCardReader.Domain
             (17, "Monufia", "المنوفية"),
             (18, "Beheira", "البحيرة"),
             (19, "Ismailia", "الإسماعيلية"),
-            (20, "Giza", "الجيزة"),
+            (21, "Giza", "الجيزة"),
             (22, "Beni Suef", "بني سويف"),
             (23, "Fayoum", "الفيوم"),
             (24, "Minya", "المنيا"),
@@ -122,6 +123,11 @@ namespace IdCardReader.Domain
         public string GetGovernorateArabic() => _governorateLookup.TryGetValue(GovernorateCode, out var result) ? result.arabic : "Unknown";
 
         /// <summary>
+        /// True when <paramref name="code"/> is a governorate code that can appear in a national number.
+        /// </summary>
+        public static bool IsKnownGovernorateCode(int code) => _governorateLookup.ContainsKey(code);
+
+        /// <summary>
         /// Non-throwing variant of <see cref="Create"/>; returns null when the value is not a valid ID.
         /// </summary>
         public static NationalIdNumber? TryCreate(string? raw)
@@ -157,8 +163,9 @@ namespace IdCardReader.Domain
             normalized = normalized.Replace("\u06F0", "0").Replace("\u06F1", "1").Replace("\u06F2", "2").Replace("\u06F3", "3").Replace("\u06F4", "4")
                 .Replace("\u06F5", "5").Replace("\u06F6", "6").Replace("\u06F7", "7").Replace("\u06F8", "8").Replace("\u06F9", "9");
 
-            // Strip all non-digit characters
-            var digitsOnly = string.Join("", normalized.Where(char.IsDigit));
+            // Strip everything that is not an ASCII digit. char.IsDigit also accepts digits of other
+            // scripts, which int.Parse would reject with a FormatException instead of an ArgumentException.
+            var digitsOnly = string.Concat(normalized.Where(c => c is >= '0' and <= '9'));
 
             if (digitsOnly.Length != 14)
                 throw new ArgumentException($"National ID number must have exactly 14 digits after normalization, got {digitsOnly.Length}", nameof(raw));
@@ -178,13 +185,18 @@ namespace IdCardReader.Domain
             if (mm < 1 || mm > 12)
                 throw new ArgumentException($"Invalid month '{mm}' in national ID birth date. Must be between 01 and 12.", nameof(raw));
 
-            // Check day range (basic - full validation by DateOnly constructor)
-            if (dd < 1 || dd > 31)
-                throw new ArgumentException($"Invalid day '{dd}' in national ID birth date. Must be between 01 and 31.", nameof(raw));
+            // Check the day against the real calendar (leap years included)
+            if (dd < 1 || dd > DateTime.DaysInMonth(year, mm))
+                throw new ArgumentException($"Invalid day '{dd}' in national ID birth date for month {mm:00} of {year}.", nameof(raw));
 
             // Check not in the future
             if (new DateOnly(year, mm, dd) > DateOnly.FromDateTime(DateTime.UtcNow))
                 throw new ArgumentException("Birth date cannot be in the future.", nameof(raw));
+
+            // Check the governorate code (digits 8-9)
+            var governorateCode = int.Parse(digitsOnly.Substring(7, 2));
+            if (!IsKnownGovernorateCode(governorateCode))
+                throw new ArgumentException($"Unknown governorate code '{governorateCode:00}' in national ID.", nameof(raw));
 
             return new NationalIdNumber(digitsOnly);
         }

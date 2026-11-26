@@ -3,7 +3,7 @@ using IdCardReader.Infrastructure.Imaging;
 namespace IdCardReader.Infrastructure.IntegrationTests;
 
 /// <summary>
-/// The name and address shown for review must come from labelled text on the card.
+/// The name and address shown for review must match the card's text layout.
 /// Guessing a name from unrelated Arabic text is worse than leaving the field empty.
 /// </summary>
 public sealed class ArabicTextFieldsTests
@@ -48,5 +48,24 @@ public sealed class ArabicTextFieldsTests
 
         Assert.Equal("أحمد محمد علي", name);
         Assert.Equal("شارع النيل", address);
+    }
+
+    [Fact]
+    public void Select_ExtractsUnlabelledNameSplitAcrossAdjacentLines()
+    {
+        const string text =
+            "محمد\nعبدالفتاح عبد الواحد البهى\n٤ ح صابر عابد - سكة الوايلي\nحدائق القبة - القاهرة";
+
+        var (name, _) = ArabicTextFields.Select(text);
+
+        Assert.Equal("محمد عبدالفتاح عبد الواحد البهى", name);
+    }
+
+    [Fact]
+    public void Select_DoesNotTreatAnUnlabelledAddressAsAName()
+    {
+        var (name, _) = ArabicTextFields.Select("حدائق القبة - القاهرة");
+
+        Assert.Null(name);
     }
 }

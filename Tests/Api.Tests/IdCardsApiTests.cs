@@ -130,7 +130,10 @@ public sealed class IdCardsApiTests
         using var content = new MultipartFormDataContent();
         var file = new ByteArrayContent(Encoding.UTF8.GetBytes("this is not an image"));
         file.Headers.ContentType = new MediaTypeHeaderValue("image/png");
-        content.Add(file, "image", "fake.png");
+        content.Add(file, "frontImage", "fake.png");
+        var back = new ByteArrayContent(OnePixelPng);
+        back.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        content.Add(back, "backImage", "back.png");
 
         var response = await client.PostAsync("/api/idcards/scan", content);
 
@@ -150,19 +153,56 @@ public sealed class IdCardsApiTests
         var response = await client.PostAsync("/api/idcards/scan", content);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Equal("image_required", await ReadErrorCodeAsync(response));
+        Assert.Equal("front_image_required", await ReadErrorCodeAsync(response));
     }
 
     [Fact]
-    public async Task Scan_WithPng_ReturnsPreviewFromOcr()
+    public async Task Scan_WithoutFrontImage_ReturnsFrontImageRequired()
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
 
         using var content = new MultipartFormDataContent();
-        var file = new ByteArrayContent(OnePixelPng);
-        file.Headers.ContentType = new MediaTypeHeaderValue("image/png");
-        content.Add(file, "image", "card.png");
+        var back = new ByteArrayContent(OnePixelPng);
+        back.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        content.Add(back, "backImage", "back.png");
+
+        var response = await client.PostAsync("/api/idcards/scan", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("front_image_required", await ReadErrorCodeAsync(response));
+    }
+
+    [Fact]
+    public async Task Scan_WithOnlyFrontImage_ReturnsBackImageRequired()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+
+        using var content = new MultipartFormDataContent();
+        var front = new ByteArrayContent(OnePixelPng);
+        front.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        content.Add(front, "frontImage", "front.png");
+
+        var response = await client.PostAsync("/api/idcards/scan", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("back_image_required", await ReadErrorCodeAsync(response));
+    }
+
+    [Fact]
+    public async Task Scan_WithBothPngImages_ReturnsPreviewIncludingBackFields()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+
+        using var content = new MultipartFormDataContent();
+        var front = new ByteArrayContent(OnePixelPng);
+        front.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        content.Add(front, "frontImage", "front.png");
+        var back = new ByteArrayContent(OnePixelPng);
+        back.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        content.Add(back, "backImage", "back.png");
 
         var response = await client.PostAsync("/api/idcards/scan", content);
 
@@ -175,6 +215,37 @@ public sealed class IdCardsApiTests
         Assert.True(root.GetProperty("nationalIdValid").GetBoolean());
         Assert.False(root.GetProperty("lowConfidence").GetBoolean());
         Assert.Equal("12", root.GetProperty("governorateCode").GetString());
+        Assert.Equal("مهندس", root.GetProperty("occupation").GetString());
+        Assert.Equal("متزوج", root.GetProperty("maritalStatus").GetString());
+        Assert.Equal("2030-01-01", root.GetProperty("expiryDate").GetString());
+    }
+
+    [Fact]
+    public async Task Create_WithAdditionalCardFields_PersistsTheyForRetrieval()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+
+        var create = await client.PostAsJsonAsync("/api/idcards", new
+        {
+            nationalId = ValidNationalId,
+            fullName = "TEST SUBJECT",
+            address = "TEST ADDRESS",
+            lowConfidence = false,
+            occupation = "مهندس",
+            maritalStatus = "متزوج",
+            expiryDate = "2030-01-01"
+        });
+
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        var location = create.Headers.Location;
+        Assert.NotNull(location);
+
+        using var document = JsonDocument.Parse(await (await client.GetAsync(location)).Content.ReadAsStringAsync());
+        var root = document.RootElement;
+        Assert.Equal("مهندس", root.GetProperty("occupation").GetString());
+        Assert.Equal("متزوج", root.GetProperty("maritalStatus").GetString());
+        Assert.Equal("2030-01-01", root.GetProperty("expiryDate").GetString());
     }
 
     [Fact]

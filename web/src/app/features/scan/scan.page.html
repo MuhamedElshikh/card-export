@@ -6,27 +6,77 @@
     </div>
   </header>
 
-  <label class="dropzone">
-    <span class="dropzone__icon" aria-hidden="true">⬆</span>
-    <strong>{{ (previewUrl() ? 'scan.change' : 'scan.choose') | translate }}</strong>
-    <span class="muted">{{ 'scan.hint' | translate }}</span>
-    <input
-      type="file"
-      accept="image/png,image/jpeg"
-      [disabled]="scanning()"
-      (change)="onFileSelected($event)"
-      aria-label="{{ 'scan.choose' | translate }}" />
-  </label>
+  <div class="scan-sides">
+    <label class="dropzone">
+      <span class="dropzone__icon" aria-hidden="true">⬆</span>
+      <strong>{{ 'scan.front' | translate }}</strong>
+      <span class="muted">{{ (frontPreviewUrl() ? 'scan.change' : 'scan.choose') | translate }}</span>
+      <span class="muted">{{ 'scan.hint' | translate }}</span>
+      <input
+        type="file"
+        name="frontImage"
+        accept="image/png,image/jpeg"
+        [disabled]="scanning()"
+        (change)="onFileSelected($event)"
+        aria-label="{{ 'scan.front' | translate }}" />
+    </label>
+    <label class="dropzone">
+      <span class="dropzone__icon" aria-hidden="true">⬆</span>
+      <strong>{{ 'scan.back' | translate }}</strong>
+      <span class="muted">{{ (backPreviewUrl() ? 'scan.change' : 'scan.choose') | translate }}</span>
+      <span class="muted">{{ 'scan.hint' | translate }}</span>
+      <input
+        type="file"
+        name="backImage"
+        accept="image/png,image/jpeg"
+        [disabled]="scanning()"
+        (change)="onFileSelected($event)"
+        aria-label="{{ 'scan.back' | translate }}" />
+    </label>
+  </div>
 
-  @if (previewUrl(); as preview) {
+  @if (frontPreviewUrl(); as preview) {
     <div class="preview">
-      <img [src]="preview" alt="{{ 'scan.heading' | translate }}" />
+      <strong>{{ 'scan.front' | translate }}</strong>
+      <img [src]="preview" alt="{{ 'scan.front' | translate }}" />
     </div>
   }
+  @if (backPreviewUrl(); as preview) {
+    <div class="preview">
+      <strong>{{ 'scan.back' | translate }}</strong>
+      <img [src]="preview" alt="{{ 'scan.back' | translate }}" />
+    </div>
+  }
+
+  <div class="actions actions--tight">
+    <label class="ghost-button camera-button" [class.is-disabled]="scanning()">
+      {{ 'scan.takeFrontPhoto' | translate }}
+      <input
+        type="file"
+        name="frontImage"
+        accept="image/*"
+        capture="environment"
+        [disabled]="scanning()"
+        (change)="onFileSelected($event)"
+        aria-label="{{ 'scan.takeFrontPhoto' | translate }}" />
+    </label>
+    <label class="ghost-button camera-button" [class.is-disabled]="scanning()">
+      {{ 'scan.takeBackPhoto' | translate }}
+      <input
+        type="file"
+        name="backImage"
+        accept="image/*"
+        capture="environment"
+        [disabled]="scanning()"
+        (change)="onFileSelected($event)"
+        aria-label="{{ 'scan.takeBackPhoto' | translate }}" />
+    </label>
+  </div>
 
   @if (scanning()) {
     <p class="muted scanning">
       <span class="spinner" aria-hidden="true"></span>{{ 'scan.scanning' | translate }}
+      <button type="button" class="ghost-button" (click)="cancelScan()">{{ 'scan.cancel' | translate }}</button>
     </p>
   }
 
@@ -91,6 +141,36 @@
           autocomplete="off"
           [value]="address()"
           (input)="onAddressInput($event)" />
+      </div>
+
+      <div class="field">
+        <label for="occupation">{{ 'fields.occupation' | translate }}</label>
+        <input
+          id="occupation"
+          type="text"
+          autocomplete="off"
+          [value]="occupation()"
+          (input)="onOccupationInput($event)" />
+      </div>
+
+      <div class="field">
+        <label for="maritalStatus">{{ 'fields.maritalStatus' | translate }}</label>
+        <input
+          id="maritalStatus"
+          type="text"
+          autocomplete="off"
+          [value]="maritalStatus()"
+          (input)="onMaritalStatusInput($event)" />
+      </div>
+
+      <div class="field">
+        <label for="expiryDate">{{ 'fields.expiryDate' | translate }}</label>
+        <input
+          id="expiryDate"
+          type="date"
+          dir="ltr"
+          [value]="expiryDate()"
+          (input)="onExpiryDateInput($event)" />
       </div>
     </div>
 

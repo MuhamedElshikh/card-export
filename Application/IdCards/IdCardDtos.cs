@@ -8,6 +8,9 @@ public sealed record ScanResultDto(
     string? NationalId,
     string? FullName,
     string? Address,
+    string? Occupation,
+    string? MaritalStatus,
+    DateOnly? ExpiryDate,
     bool NationalIdValid,
     bool LowConfidence,
     DateOnly? BirthDate,
@@ -25,6 +28,9 @@ public sealed record SaveIdCardRequest(
     string FullName,
     string Address,
     bool LowConfidence,
+    string? Occupation = null,
+    string? MaritalStatus = null,
+    DateOnly? ExpiryDate = null,
     string? ImageBase64 = null);
 
 /// <summary>Stored ID card representation.</summary>
@@ -33,6 +39,9 @@ public sealed record IdCardDto(
     string NationalId,
     string FullName,
     string Address,
+    string? Occupation,
+    string? MaritalStatus,
+    DateOnly? ExpiryDate,
     DateOnly BirthDate,
     bool IsMale,
     string GovernorateCode,

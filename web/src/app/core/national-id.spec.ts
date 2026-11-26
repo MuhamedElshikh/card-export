@@ -59,11 +59,19 @@ describe('parseNationalId', () => {
   });
 
   it('rejects an unknown governorate code', () => {
-    expect(parseNationalId('29001012134567')).toBeNull(); // code 21 is not in the map
+    expect(parseNationalId('29001012034567')).toBeNull(); // there is no code 20
+    expect(parseNationalId('29001019934567')).toBeNull();
   });
 
-  it('knows every governorate code required by the specification', () => {
-    const required = ['01', '02', '03', '04', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
+  it('accepts code 21 as Giza', () => {
+    const parsed = parseNationalId('29001012134567');
+    expect(parsed?.governorateCode).toBe('21');
+    expect(parsed?.governorateEnglish).toBe('Giza');
+    expect(parsed?.governorateArabic).toBe('الجيزة');
+  });
+
+  it('knows every governorate code that can appear in a national number', () => {
+    const required = ['01', '02', '03', '04', '11', '12', '13', '14', '15', '16', '17', '18', '19', '21',
       '22', '23', '24', '25', '26', '27', '28', '29', '31', '32', '33', '34', '35', '88'];
 
     for (const code of required) {

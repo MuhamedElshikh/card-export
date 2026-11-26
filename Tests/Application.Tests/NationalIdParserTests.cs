@@ -30,7 +30,7 @@ public class NationalIdParserTests
     /// ID: 30001011234568
     /// - Digit 1: 3 = 2000s, so year = 2000 + 00 = 2000
     /// - Digits 2-7: 000101 = YY=00, MM=01, DD=01 = Jan 1, 2000
-    /// - Digits 8-9: 12 = governorate 12 = Beni Suef
+    /// - Digits 8-9: 12 = governorate 12 = Dakahlia
     /// - Digits 10-12: 345 = sequence
     /// - Digit 13: 8 = even = female
     /// - Digit 14: 8
@@ -44,7 +44,7 @@ public class NationalIdParserTests
         // digit 13 = 8 (even = female -> IsMale = False)
         Assert.False(id.IsMale);
         Assert.Equal(new DateOnly(2000, 1, 1), id.BirthDate);
-        Assert.Equal(12, id.GovernorateCode); // Beni Suef
+        Assert.Equal(12, id.GovernorateCode); // Dakahlia
     }
 
     [Fact]
@@ -117,6 +117,73 @@ public class NationalIdParserTests
         var result = IdCardReader.Domain.NationalIdResult.FromParsedNumber(id, "Ali Hassan", "Baghdad address");
         Assert.Equal("Born abroad", result.GovernorateEnglish);
         Assert.Equal("خارج البلاد", result.GovernorateArabic);
+    }
+
+    [Fact]
+    public void Create_Governorate21_ReturnsGiza()
+    {
+        // 2|900101|21|3456|7 - code 21 is Giza
+        var id = NationalIdNumber.Create("29001012134567");
+        Assert.Equal(21, id.GovernorateCode);
+
+        var result = NationalIdResult.FromParsedNumber(id);
+        Assert.Equal("Giza", result.GovernorateEnglish);
+        Assert.Equal("الجيزة", result.GovernorateArabic);
+    }
+
+    [Theory]
+    [InlineData("29001012034567")] // 20 is not a governorate code
+    [InlineData("29001019934567")] // 99 is not a governorate code
+    [InlineData("29001010034567")] // 00 is not a governorate code
+    public void Create_UnknownGovernorateCode_ThrowsArgumentException(string value)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => NationalIdNumber.Create(value));
+        Assert.Contains("governorate", ex.Message);
+        Assert.Null(NationalIdNumber.TryCreate(value));
+    }
+
+    [Theory]
+    [InlineData("29002301234567")] // 30 February
+    [InlineData("29002311234567")] // 31 February
+    [InlineData("29004311234567")] // 31 April
+    [InlineData("29002291234567")] // 29 February 1990 (not a leap year)
+    public void Create_ImpossibleCalendarDate_ThrowsArgumentException(string value)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => NationalIdNumber.Create(value));
+        Assert.Contains("day", ex.Message);
+    }
+
+    [Fact]
+    public void Create_LeapDay_IsAccepted()
+    {
+        // 29 February 1992 (leap year), governorate 01
+        var id = NationalIdNumber.Create("29202290134567");
+        Assert.Equal(new DateOnly(1992, 2, 29), id.BirthDate);
+    }
+
+    [Fact]
+    public void Create_DigitsOfOtherScripts_AreRejectedWithArgumentException()
+    {
+        // Devanagari digits are "digits" for char.IsDigit but are not valid input; this must be an
+        // ArgumentException (a 400 for the caller), never a FormatException (a 500).
+        var devanagari = "\u0968\u096F\u0966\u0966\u0967\u0966\u0967\u0967\u0968\u0969\u096A\u096B\u096C\u096D";
+        Assert.Throws<ArgumentException>(() => NationalIdNumber.Create(devanagari));
+        Assert.Null(NationalIdNumber.TryCreate(devanagari));
+    }
+
+    [Fact]
+    public void IsKnownGovernorateCode_MatchesTheOfficialCodeList()
+    {
+        var expected = new[]
+        {
+            1, 2, 3, 4, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+            31, 32, 33, 34, 35, 88
+        };
+
+        for (var code = 0; code <= 99; code++)
+        {
+            Assert.Equal(expected.Contains(code), NationalIdNumber.IsKnownGovernorateCode(code));
+        }
     }
 
     [Fact]

@@ -15,6 +15,7 @@ namespace IdCardReader.Api.Controllers;
 public sealed class IdCardsController : ControllerBase
 {
     private const int MaxImageBytes = 5 * 1024 * 1024;
+    private const int MaxScanRequestBytes = (2 * MaxImageBytes) + 16 * 1024;
 
     private readonly IIdCardOcrService _ocrService;
     private readonly IdCardService _idCardService;
@@ -35,49 +36,58 @@ public sealed class IdCardsController : ControllerBase
     }
 
     /// <summary>
-    /// Runs OCR on an uploaded ID image and returns a reviewable preview.
+    /// Runs OCR on both sides of an uploaded ID card and returns a reviewable preview.
     /// Nothing is persisted by this endpoint.
     /// </summary>
     [HttpPost("scan")]
     [EnableRateLimiting(RateLimitPolicies.Scan)]
-    [RequestSizeLimit(MaxImageBytes + 8192)]
-    [RequestFormLimits(MultipartBodyLengthLimit = MaxImageBytes + 8192)]
+    [RequestSizeLimit(MaxScanRequestBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = MaxScanRequestBytes)]
     [ProducesResponseType(typeof(ScanResultDto), StatusCodes.Status200OK)]
-    public async Task<IActionResult> Scan(IFormFile? image, CancellationToken cancellationToken)
+    public async Task<IActionResult> Scan(
+        IFormFile? frontImage,
+        IFormFile? backImage,
+        CancellationToken cancellationToken)
     {
-        if (image is null || image.Length == 0)
+        if (frontImage is null || frontImage.Length == 0)
         {
-            return ApiProblem(StatusCodes.Status400BadRequest, "image_required", "No image was uploaded.");
+            return ApiProblem(
+                StatusCodes.Status400BadRequest,
+                "front_image_required",
+                "The front of the ID card is required.");
         }
 
-        if (image.Length > MaxImageBytes)
+        if (backImage is null || backImage.Length == 0)
+        {
+            return ApiProblem(
+                StatusCodes.Status400BadRequest,
+                "back_image_required",
+                "The back of the ID card is required.");
+        }
+
+        if (frontImage.Length > MaxImageBytes || backImage.Length > MaxImageBytes)
         {
             return ApiProblem(
                 StatusCodes.Status413PayloadTooLarge,
                 "image_too_large",
-                $"The image must be {MaxImageBytes / (1024 * 1024)} MB or smaller.");
+                $"Each image must be {MaxImageBytes / (1024 * 1024)} MB or smaller.");
         }
 
-        byte[] bytes;
-        await using (var buffer = new MemoryStream())
-        {
-            await using var upload = image.OpenReadStream();
-            await upload.CopyToAsync(buffer, cancellationToken);
-            bytes = buffer.ToArray();
-        }
+        var frontBytes = await ReadImageBytesAsync(frontImage, cancellationToken);
+        var backBytes = await ReadImageBytesAsync(backImage, cancellationToken);
 
-        if (!ImageSignature.IsSupported(bytes))
+        if (!ImageSignature.IsSupported(frontBytes) || !ImageSignature.IsSupported(backBytes))
         {
             return ApiProblem(
                 StatusCodes.Status400BadRequest,
                 "unsupported_image_format",
-                "Only JPEG and PNG images are accepted.");
+                "Both images must be valid JPEG or PNG files.");
         }
 
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var ocrResult = await _ocrService.ScanAsync(bytes, cancellationToken);
+            var ocrResult = await _ocrService.ScanAsync(frontBytes, backBytes, cancellationToken);
             var preview = _idCardService.ToScanResult(ocrResult);
             stopwatch.Stop();
 
@@ -89,6 +99,7 @@ public sealed class IdCardsController : ControllerBase
 
             return Ok(preview);
         }
+
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _logger.LogInformation("ID card scan cancelled by the client.");
@@ -111,6 +122,14 @@ public sealed class IdCardsController : ControllerBase
                 "scan_failed",
                 "The image could not be processed.");
         }
+    }
+
+    private static async Task<byte[]> ReadImageBytesAsync(IFormFile image, CancellationToken cancellationToken)
+    {
+        await using var buffer = new MemoryStream();
+        await using var upload = image.OpenReadStream();
+        await upload.CopyToAsync(buffer, cancellationToken);
+        return buffer.ToArray();
     }
 
     /// <summary>Stores a reviewed ID card after re-validating the national ID on the server.</summary>

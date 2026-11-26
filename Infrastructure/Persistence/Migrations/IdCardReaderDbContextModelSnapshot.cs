@@ -41,6 +41,9 @@ namespace IdCardReader.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateOnly?>("ExpiryDate")
+                        .HasColumnType("date");
+
                     b.Property<string>("FullName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -71,11 +74,19 @@ namespace IdCardReader.Infrastructure.Persistence.Migrations
                     b.Property<bool>("LowConfidence")
                         .HasColumnType("bit");
 
+                    b.Property<string>("MaritalStatus")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.Property<string>("NationalId")
                         .IsRequired()
                         .HasMaxLength(14)
                         .IsUnicode(false)
                         .HasColumnType("varchar(14)");
+
+                    b.Property<string>("Occupation")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.HasKey("Id");
 
