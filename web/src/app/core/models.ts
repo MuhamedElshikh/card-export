@@ -4,6 +4,9 @@ export interface ScanResult {
   nationalId: string | null;
   fullName: string | null;
   address: string | null;
+  occupation: string | null;
+  maritalStatus: string | null;
+  expiryDate: string | null;
   nationalIdValid: boolean;
   lowConfidence: boolean;
   birthDate: string | null;
@@ -18,6 +21,9 @@ export interface SaveIdCardRequest {
   fullName: string;
   address: string;
   lowConfidence: boolean;
+  occupation?: string | null;
+  maritalStatus?: string | null;
+  expiryDate?: string | null;
   imageBase64?: string | null;
 }
 
@@ -26,6 +32,9 @@ export interface IdCard {
   nationalId: string;
   fullName: string;
   address: string;
+  occupation: string | null;
+  maritalStatus: string | null;
+  expiryDate: string | null;
   birthDate: string;
   isMale: boolean;
   governorateCode: string;

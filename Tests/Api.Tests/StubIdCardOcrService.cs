@@ -10,7 +10,10 @@ public sealed class StubIdCardOcrService : IIdCardOcrService
     public const string NationalId = "29001011234567";
 
     /// <inheritdoc />
-    public Task<IdCardScanResult> ScanAsync(byte[] imageBytes, CancellationToken cancellationToken = default)
+    public Task<IdCardScanResult> ScanAsync(
+        byte[] frontImageBytes,
+        byte[] backImageBytes,
+        CancellationToken cancellationToken = default)
     {
         var parsed = NationalIdNumber.Create(NationalId);
         var derived = NationalIdResult.FromParsedNumber(parsed, "TEST SUBJECT", "TEST ADDRESS");
@@ -20,6 +23,9 @@ public sealed class StubIdCardOcrService : IIdCardOcrService
             NationalId = derived.NationalIdNumber,
             FullName = derived.FullName,
             Address = derived.Address,
+            Occupation = "مهندس",
+            MaritalStatus = "متزوج",
+            ExpiryDate = new DateOnly(2030, 1, 1),
             NationalIdValid = true,
             LowConfidence = false,
             BirthDate = derived.BirthDate,

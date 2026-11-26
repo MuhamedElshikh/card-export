@@ -8,14 +8,18 @@ namespace IdCardReader.Application;
 public interface IIdCardOcrService
 {
     /// <summary>
-    /// Extracts data from an Egyptian national ID image.
+    /// Extracts data from the front and back of an Egyptian national ID card.
     /// Returns a preview with the national ID (which must be correct)
-    /// and best-effort fields (name, address) that the user can review/edit.
+    /// and best-effort fields that the user can review/edit.
     /// </summary>
-    /// <param name="imageBytes">The ID image bytes (JPEG/PNG, max 5MB)</param>
+    /// <param name="frontImageBytes">The front image bytes (JPEG/PNG, max 5MB)</param>
+    /// <param name="backImageBytes">The back image bytes (JPEG/PNG, max 5MB)</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>IdCardScanResult with preview data</returns>
-    Task<IdCardScanResult> ScanAsync(byte[] imageBytes, CancellationToken cancellationToken = default);
+    Task<IdCardScanResult> ScanAsync(
+        byte[] frontImageBytes,
+        byte[] backImageBytes,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -40,6 +44,15 @@ public class IdCardScanResult
     /// Address as it appears on the ID (best-effort OCR).
     /// </summary>
     public string? Address { get; set; }
+
+    /// <summary>Occupation read from the back of the card, or null if not recognized.</summary>
+    public string? Occupation { get; set; }
+
+    /// <summary>Marital status read from the card, or null if not recognized.</summary>
+    public string? MaritalStatus { get; set; }
+
+    /// <summary>Expiry date read from the back of the card, or null if not recognized.</summary>
+    public DateOnly? ExpiryDate { get; set; }
 
     /// <summary>
     /// Whether the national ID number is valid according to domain rules.

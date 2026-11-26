@@ -125,6 +125,23 @@ public sealed class ImagePreprocessorTests
         Assert.Equal(128, stretched.GetPixel(10, 10).Red);
     }
 
+    [Fact]
+    public void Sharpen_IncreasesContrastAroundPrintedStrokes()
+    {
+        using var source = CreateBitmap(5, 5, new SKColor(128, 128, 128));
+        using (var canvas = new SKCanvas(source))
+        using (var paint = new SKPaint { Color = new SKColor(32, 32, 32) })
+        {
+            canvas.DrawRect(SKRect.Create(2, 2, 1, 1), paint);
+        }
+
+        using var gray = ImagePreprocessor.ToGrayscale(source);
+        using var sharpened = ImagePreprocessor.Sharpen(gray);
+
+        Assert.True(sharpened.GetPixel(1, 2).Red > gray.GetPixel(1, 2).Red);
+        Assert.True(sharpened.GetPixel(2, 2).Red < gray.GetPixel(2, 2).Red);
+    }
+
     [Theory]
     [InlineData(1, 120, 200)]
     [InlineData(2, 200, 120)]

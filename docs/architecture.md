@@ -24,7 +24,7 @@ Api knows Application + Infrastructure. Nothing points inwards except through in
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| POST | `/api/idcards/scan` | multipart `image` (JPEG/PNG, <= 5 MB). Returns a preview. **Persists nothing.** |
+| POST | `/api/idcards/scan` | multipart `frontImage` + `backImage` (JPEG/PNG, <= 5 MB each). Returns a preview. **Persists nothing.** |
 | POST | `/api/idcards` | Stores a reviewed card. Re-validates the national ID server side. |
 | GET | `/api/idcards?search=&page=1&pageSize=20` | Paged list, search matches name or national ID. |
 | GET | `/api/idcards/{id}` | Single card. |
@@ -33,7 +33,7 @@ Api knows Application + Infrastructure. Nothing points inwards except through in
 `POST /api/idcards` request:
 
 ```json
-{ "nationalId": "29001011234567", "fullName": "…", "address": "…", "lowConfidence": false, "imageBase64": null }
+{ "nationalId": "29001011234567", "fullName": "…", "address": "…", "occupation": "…", "maritalStatus": "…", "expiryDate": "2030-01-01", "lowConfidence": false, "imageBase64": null }
 ```
 
 `imageBase64` is only accepted when `Storage:StoreImage=true`; otherwise the call fails with
@@ -41,7 +41,7 @@ Api knows Application + Infrastructure. Nothing points inwards except through in
 the client, they are recomputed from the national ID number.
 
 Errors are RFC 7807 `application/problem+json` with a translatable `code` extension:
-`image_required`, `image_too_large`, `unsupported_image_format`, `scan_failed`, `invalid_national_id`,
+`front_image_required`, `back_image_required`, `image_too_large`, `unsupported_image_format`, `scan_failed`, `invalid_national_id`,
 `duplicate_national_id`, `validation_failed`, `image_storage_disabled`, `id_card_not_found`.
 
 ## Database
@@ -54,6 +54,9 @@ Single table `IdCards`:
 | NationalId | varchar(14) | **unique index** `IX_IdCards_NationalId` -> duplicate returns 409 |
 | FullName | nvarchar(200) | required |
 | Address | nvarchar(500) | required, may be empty |
+| Occupation | nvarchar(200) | optional, reviewed OCR from the back |
+| MaritalStatus | nvarchar(100) | optional, reviewed OCR |
+| ExpiryDate | date | optional, read from the back |
 | BirthDate | date | derived |
 | IsMale | bit | derived from digit 13 |
 | GovernorateCode | varchar(2) | derived from digits 8-9 |
@@ -62,41 +65,55 @@ Single table `IdCards`:
 | ImageReference | nvarchar(400) | null unless image storage is enabled |
 | CreatedAt | datetime2 | UTC |
 
-Migration: `Infrastructure/Persistence/Migrations/*_InitialCreate.cs`.
+Migrations: `Infrastructure/Persistence/Migrations/`.
 `Database:Provider=Sqlite` exists for local/dev and tests only; SQL Server uses real migrations,
 SQLite builds the schema from the model (`EnsureCreated`).
 
 ## OCR pipeline (v2)
 
-`TesseractIdCardOcrService` (offline, no network, no GPU):
+`TesseractIdCardOcrService` (offline, no image upload, no GPU):
 
-1. The API checks JPEG/PNG magic bytes and the 5 MB limit before OCR is invoked.
+1. The API requires both sides and checks JPEG/PNG magic bytes and the 5 MB per-image limit before OCR is invoked.
 2. `ImagePreprocessor` decodes with SkiaSharp, applies EXIF orientation, scales to
    `Ocr:NumberLongEdge` (1100 px; tiny images are raised to at least 900 px), converts to grayscale
-   with BT.601 luma, and stretches the histogram between the 1st and 99th percentile.
+   with BT.601 luma, stretches the histogram between the 1st and 99th percentile, estimates skew,
+   deskews and sharpens. This sequence runs for both images on every scan.
 3. A projection-profile search removes small text skew. It returns 0 when the image has no dominant
    horizontal direction (a sideways photo), because rotating then would add skew instead of removing it.
 4. The number search tries orientations 0°, 180°, 90°, 270° on a local-mean binarised image
    (tolerates shadows and uneven light), then 0°/180° with a global Otsu threshold if nothing
    convincing was found. Each orientation is read twice: `eng` with a Western-digit whitelist
    (much better at printed digits) and `ara` with Western plus Arabic-Indic digits. The search
-   stops as soon as two direct passes agree.
+   stops as soon as two direct passes agree. When the result is low-confidence and Tesseract saw
+   digits, a lazily loaded PP-OCRv5 ONNX engine reads the prepared image in four orientations,
+   trying Latin and then Arabic recognition.
 5. **No invented data:** `DigitCandidates` accepts a number only when one OCR line contains exactly
    14 digits (spaces between printed groups are ignored) and the value passes domain validation.
    Sliding windows inside longer digit runs and digits joined across lines are never accepted —
    they are arithmetic coincidences. The winner needs >= 60 % of the votes **and** at least two
-   independent direct reads; a single read is reported as `lowConfidence=true`.
-6. Name/address are read once at `Ocr:TextLongEdge` (1800 px) on the winning orientation with the
+   independent direct reads; a single read is reported as `lowConfidence=true`. PP-OCRv5 is used
+   only when a whole validated line has model confidence >= 0.90 and only one distinct valid
+   candidate remains. A fallback result stays `lowConfidence=true` for user review.
+6. Front-side name/address are read once at `Ocr:TextLongEdge` (1800 px) on the winning orientation with the
    Arabic model (Auto layout, SparseText retry). `ArabicTextFields` strips the **whole** label
    (including `بالكامل`, which otherwise becomes the "name"), requires at least two name tokens,
-   rejects card headings, and never promotes an unlabelled line to a name or address. An empty field
-   is better than a wrong one. Both stay user-editable.
-7. Birth date, gender and governorate are **derived from the accepted national ID**, not read from
-   the back of the card. When the ID is not accepted they stay empty.
-8. Tesseract engines are pooled and leased, never created per request. Concurrency is bounded by
-   `SemaphoreSlim(Ocr:MaxConcurrentScans)` (default 1) so a dual-core box does not thrash.
-9. Intermediate PNGs live in a unique temp directory deleted in a `finally` block. Scan logs record
-   vote count, share, rotation, skew and pass count only — never names, addresses, numbers or bytes.
+   rejects card headings and common address markers, and can join a preceding single name token to
+   an unlabelled name line. Address still requires a recognized label. Both stay user-editable.
+7. The back is scanned at the same text resolution and orientations. `ArabicBackFields` first uses
+   labels when present, then handles the unlabeled Egyptian layout: it recognizes marital status
+   only from a fixed vocabulary and takes up to three consecutive text lines before that status row
+   as the occupation/qualification. If Tesseract leaves fields missing, PP-OCRv5 retries Arabic text
+   recognition and contributes only lines with confidence >= 0.75. The expiry parser also recognizes
+   `البطاقة سارية حتى` and a unique unlabeled full date; Arabic-Indic date digits are normalized.
+   Ambiguous or missing values stay empty for user review.
+8. Birth date, gender and governorate are **derived from the accepted national ID**. When the ID is
+   not accepted they stay empty.
+9. Tesseract engines are pooled and leased, never created per request. The PP-OCRv5 engine is loaded
+   lazily once and reused. Concurrency is bounded by `SemaphoreSlim(Ocr:MaxConcurrentScans)`
+   (default 1) so a dual-core box does not thrash.
+10. Intermediate PNGs live in a unique temp directory deleted in a `finally` block. Scan logs record
+   vote count, share, rotation, skew, pass count and fallback field-presence flags — never names,
+   addresses, numbers or bytes.
 
 **Still not implemented:** card contour detection and perspective warp. They need a contour/Hough
 pipeline that no usable net8.0 binding provides here. Photographs where the card occupies only a
@@ -112,6 +129,7 @@ small part of the frame still rely on whole-image OCR.
 | SkiaSharp 2.88.9 | MIT licensed, Windows + Linux native assets, no fontconfig needed (`NativeAssets.Linux.NoDependencies`). ImageSharp 2.1 is Apache-2.0 but has decoder advisories, 3.x changes licence; System.Drawing.Common is Windows-only. |
 | Bundled `eng.traineddata` | tessdata_fast English model (~4.1 MB) reads printed Western digits far better than the Arabic LSTM model; the Arabic model is still used for Arabic-Indic digits and all text. Both ship offline. |
 | `EngineMode.LstmOnly` | both bundled models are tessdata_fast with no legacy components, so OEM 3 fails to load them. |
+| PP-OCRv5 fallback | `PdfNetStack.Ocr` (MIT) runs PP-OCRv5 ONNX locally; the separate Arabic/Latin model package (Apache-2.0 models, about 21 MB) is copied into build/publish output. The fallback runs only for low-confidence Tesseract reads with digit evidence, requires confidence >= 0.90 and one unique, domain-valid 14-digit line, and remains flagged for review. |
 | Pooled engines | creation and model loading cost hundreds of milliseconds; engines are leased from a small pool instead of being rebuilt for each scan. Tesseract engines are not thread safe. |
 | Images off by default | `Storage:StoreImage=false`. When enabled, AES-256-GCM blobs are written outside the web root and only an opaque reference is stored. |
-| Logs contain no PII | scan logs record duration, vote count, winner share, direct-read flag, rotation, skew, pass count, `NationalIdFound` and `LowConfidence` only — never names, addresses, numbers or image bytes. |
+| Logs contain no PII | scan logs record duration, vote count, winner share, direct-read flag, rotation, skew, pass count, `PaddleFallbackUsed`, `NationalIdFound` and `LowConfidence` only — never names, addresses, numbers or image bytes. |

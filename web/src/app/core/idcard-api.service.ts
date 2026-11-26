@@ -10,10 +10,11 @@ export class IdCardApiService {
   private readonly baseUrl = inject(API_BASE_URL);
   private readonly http = inject(HttpClient);
 
-  /** Sends the image for OCR. Nothing is stored server side. */
-  scan(image: File): Observable<ScanResult> {
+  /** Sends both card sides for OCR. Images are not stored server side. */
+  scan(frontImage: File, backImage: File): Observable<ScanResult> {
     const form = new FormData();
-    form.append('image', image, image.name);
+    form.append('frontImage', frontImage, frontImage.name);
+    form.append('backImage', backImage, backImage.name);
 
     return this.http
       .post<ScanResult>(`${this.baseUrl}/api/idcards/scan`, form)

@@ -93,7 +93,7 @@ internal static class EvalProgram
         {
             var bytes = await File.ReadAllBytesAsync(image);
             var stopwatch = Stopwatch.StartNew();
-            var result = await service.ScanAsync(bytes);
+            var result = await service.ScanAsync(bytes, bytes);
             stopwatch.Stop();
 
             var current = Process.GetCurrentProcess();

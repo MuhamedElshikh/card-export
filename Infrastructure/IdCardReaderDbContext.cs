@@ -42,6 +42,12 @@ public class IdCardReaderDbContext : DbContext
                 .IsRequired()
                 .HasMaxLength(500);
 
+            entity.Property(e => e.Occupation)
+                .HasMaxLength(200);
+
+            entity.Property(e => e.MaritalStatus)
+                .HasMaxLength(100);
+
             entity.Property(e => e.GovernorateCode)
                 .IsRequired()
                 .HasMaxLength(2);

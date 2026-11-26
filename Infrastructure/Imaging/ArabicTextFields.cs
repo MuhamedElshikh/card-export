@@ -18,7 +18,9 @@ public static class ArabicTextFields
 
     private static readonly string[] NotAName =
     {
-        "جمهورية", "العربية", "بطاقة", "قومي", "المحافظة", "العنوان", "الاسم"
+        "جمهورية", "العربية", "بطاقة", "قومي", "المحافظة", "العنوان", "الاسم",
+        "القاهرة", "الجيزة", "حدائق", "شارع", "حارة", "سكة", "طريق", "ميدان",
+        "منطقة", "قسم", "مركز", "قرية", "نجع", "كفر", "عزبة"
     };
 
     private static readonly string[] AddressLabels =
@@ -56,8 +58,7 @@ public static class ArabicTextFields
                 .FirstOrDefault(line => IsNameLike(line));
         }
 
-        // No unlabelled line is ever promoted to a name. A missing name is edited by the user;
-        // a guessed name (a card heading, a governorate, the label remainder) is not.
+        name ??= ReadUnlabelledName(lines);
 
         string? address = null;
         foreach (var line in lines)
@@ -90,6 +91,43 @@ public static class ArabicTextFields
         }
 
         return (name, address);
+    }
+
+    private static string? ReadUnlabelledName(IReadOnlyList<FieldLine> lines)
+    {
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var line = lines[index];
+            if (line.NameLabel || line.AddressLabel || !IsNameLike(line.Text))
+            {
+                continue;
+            }
+
+            if (index > 0)
+            {
+                var previous = lines[index - 1];
+                var combined = $"{previous.Text} {line.Text}";
+                if (!previous.NameLabel
+                    && !previous.AddressLabel
+                    && IsSingleNamePart(previous.Text)
+                    && IsNameLike(combined))
+                {
+                    return combined;
+                }
+            }
+
+            return line.Text;
+        }
+
+        return null;
+    }
+
+    private static bool IsSingleNamePart(string value)
+    {
+        var token = value.Trim();
+        return token.Length is >= 2 and <= 15
+            && token.All(char.IsLetter)
+            && !NotAName.Contains(token, StringComparer.Ordinal);
     }
 
     /// <summary>True when the line looks like a person name (no digits, mostly letters).</summary>

@@ -169,6 +169,58 @@ public static class ImagePreprocessor
         return target;
     }
 
+    /// <summary>Applies a light unsharp mask to improve printed character edges.</summary>
+    public static SKBitmap Sharpen(SKBitmap source, double amount = 0.8)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (amount < 0 || amount > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(amount), "Sharpen amount must be between 0 and 2.");
+        }
+
+        using var gray = source.ColorType == SKColorType.Gray8
+            ? source.Copy(SKColorType.Gray8)
+            : ToGrayscale(source);
+
+        var target = new SKBitmap(new SKImageInfo(gray.Width, gray.Height, SKColorType.Gray8, SKAlphaType.Opaque));
+        var input = Pixels(gray);
+        var output = Pixels(target);
+
+        for (var y = 0; y < gray.Height; y++)
+        {
+            var destinationOffset = y * target.RowBytes;
+            for (var x = 0; x < gray.Width; x++)
+            {
+                var sum = 0;
+                var count = 0;
+
+                for (var neighborY = Math.Max(0, y - 1); neighborY <= Math.Min(gray.Height - 1, y + 1); neighborY++)
+                {
+                    var sourceOffset = neighborY * gray.RowBytes;
+                    for (var neighborX = Math.Max(0, x - 1); neighborX <= Math.Min(gray.Width - 1, x + 1); neighborX++)
+                    {
+                        if (neighborX == x && neighborY == y)
+                        {
+                            continue;
+                        }
+
+                        sum += input[sourceOffset + neighborX];
+                        count++;
+                    }
+                }
+
+                var center = input[(y * gray.RowBytes) + x];
+                var blurred = count == 0 ? center : sum / (double)count;
+                output[destinationOffset + x] = (byte)Math.Clamp(
+                    Math.Round(center + ((center - blurred) * amount)),
+                    0,
+                    255);
+            }
+        }
+
+        return target;
+    }
+
     /// <summary>
     /// Local mean threshold (integral image). Robust to shadows and uneven lighting, which is the
     /// usual failure mode of a phone photo of an ID card.

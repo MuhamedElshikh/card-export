@@ -1,3 +1,17 @@
 .scanning {
   margin-block-start: 1rem;
 }
+
+.scan-sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.scan-sides .dropzone {
+  position: relative;
+}
+
+.preview strong {
+  color: var(--text);
+}

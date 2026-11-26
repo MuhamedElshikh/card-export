@@ -10,21 +10,21 @@ using Tesseract;
 namespace IdCardReader.Infrastructure;
 
 /// <summary>
-/// Offline Tesseract OCR for Egyptian national ID cards.
+/// Offline Tesseract OCR for Egyptian national ID cards, with a local PP-OCRv5 fallback for
+/// low-confidence national ID reads.
 /// <para>
 /// The pipeline is deliberately cascaded so a normal, upright photo is cheap:
 /// </para>
 /// <list type="number">
-/// <item>decode + EXIF orientation, downscale, grayscale, contrast stretch;</item>
-/// <item>estimate and remove the small rotation of the text lines (deskew);</item>
+/// <item>decode + EXIF orientation, downscale, grayscale, contrast stretch, deskew and sharpening;</item>
 /// <item>binarise with a local mean threshold (tolerates shadows and uneven light);</item>
 /// <item>
 /// read digits from the upright orientation with the English model and the Arabic model;
 /// stop as soon as both agree, otherwise try 180°, 90° and 270°, then a global Otsu threshold;
 /// </item>
-/// <item>read the name and address once, at higher resolution, on the winning orientation.</item>
+/// <item>read front-side name/address and back-side occupation, marital status and expiry date.</item>
 /// </list>
-/// Name and address remain best effort and are always reviewed by the user.
+/// Text fields remain best effort and are always reviewed by the user.
 /// </summary>
 public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
 {
@@ -41,6 +41,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
     private readonly SemaphoreSlim _scanSemaphore;
     private readonly TesseractEnginePool _arabicPool;
     private readonly TesseractEnginePool _englishPool;
+    private readonly PaddleOcrNumberReader _paddleOcr = new();
 
     /// <summary>Creates the service.</summary>
     public TesseractIdCardOcrService(
@@ -70,15 +71,21 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task<IdCardScanResult> ScanAsync(byte[] imageBytes, CancellationToken cancellationToken = default)
+    public async Task<IdCardScanResult> ScanAsync(
+        byte[] frontImageBytes,
+        byte[] backImageBytes,
+        CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(imageBytes);
+        ArgumentNullException.ThrowIfNull(frontImageBytes);
+        ArgumentNullException.ThrowIfNull(backImageBytes);
 
         await _scanSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             // Tesseract is synchronous and CPU bound; keep it off the request thread.
-            return await Task.Run(() => Scan(imageBytes, cancellationToken), cancellationToken)
+            return await Task.Run(
+                    () => Scan(frontImageBytes, backImageBytes, cancellationToken),
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
@@ -87,7 +94,31 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         }
     }
 
-    private IdCardScanResult Scan(byte[] imageBytes, CancellationToken cancellationToken)
+    private IdCardScanResult Scan(
+        byte[] frontImageBytes,
+        byte[] backImageBytes,
+        CancellationToken cancellationToken)
+    {
+        using var front = DecodeImage(frontImageBytes);
+        using var back = DecodeImage(backImageBytes);
+        var workDirectory = Path.Combine(Path.GetTempPath(), $"idcard-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDirectory);
+
+        try
+        {
+            var number = ReadNationalId(front, workDirectory, cancellationToken);
+            var (name, address) = ReadText(front, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
+            var backFields = ReadBackFields(back, workDirectory, cancellationToken);
+
+            return BuildResult(number, name, address, backFields);
+        }
+        finally
+        {
+            TryDeleteDirectory(workDirectory);
+        }
+    }
+
+    private static SKBitmap DecodeImage(byte[] imageBytes)
     {
         SKBitmap? decoded;
         try
@@ -96,31 +127,10 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            throw new ImageDecodeException("The uploaded image could not be decoded.", exception);
+            throw new ImageDecodeException("The uploaded ID card image could not be decoded.", exception);
         }
 
-        if (decoded is null)
-        {
-            throw new ImageDecodeException("The uploaded image could not be decoded.");
-        }
-
-        using (decoded)
-        {
-            var workDirectory = Path.Combine(Path.GetTempPath(), $"idcard-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(workDirectory);
-
-            try
-            {
-                var number = ReadNationalId(decoded, workDirectory, cancellationToken);
-                var (name, address) = ReadText(decoded, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
-
-                return BuildResult(number, name, address);
-            }
-            finally
-            {
-                TryDeleteDirectory(workDirectory);
-            }
-        }
+        return decoded ?? throw new ImageDecodeException("The uploaded ID card image could not be decoded.");
     }
 
     private NumberRead ReadNationalId(SKBitmap decoded, string workDirectory, CancellationToken cancellationToken)
@@ -130,85 +140,101 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             _options.NumberLongEdge,
             minimumLongEdge: 900);
         using var grayscale = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(small));
-
-        var skew = 0.0;
-        if (_options.EnablePreprocessing && _options.EnableDeskew)
-        {
-            using var probe = ImagePreprocessor.ResizeToLongEdge(grayscale, 420);
-            skew = ImagePreprocessor.EstimateSkewDegrees(probe);
-        }
+        using var probe = ImagePreprocessor.ResizeToLongEdge(grayscale, 420);
+        var skew = ImagePreprocessor.EstimateSkewDegrees(probe);
 
         using var deskewed = skew == 0
             ? grayscale.Copy(SKColorType.Gray8)
             : ImagePreprocessor.Rotate(grayscale, skew);
+        using var sharpened = ImagePreprocessor.Sharpen(deskewed);
 
         var votes = new List<DigitCandidates.Candidate>();
         var byOrientation = new Dictionary<int, List<DigitCandidates.Candidate>>();
         var passes = 0;
+        var recognizedAnyDigits = false;
 
-        if (!_options.EnablePreprocessing)
+        using (var binarized = ImagePreprocessor.BinarizeLocalMean(sharpened))
         {
-            var plain = CollectDigits(deskewed, 0, workDirectory, ref passes, cancellationToken);
-            votes.AddRange(plain);
-            byOrientation[0] = plain;
-        }
-        else
-        {
-            using (var binarized = ImagePreprocessor.BinarizeLocalMean(deskewed))
+            foreach (var turns in OrientationOrder)
             {
-                foreach (var turns in OrientationOrder)
-                {
-                    var read = CollectDigits(binarized, turns, workDirectory, ref passes, cancellationToken);
-                    votes.AddRange(read);
-                    byOrientation[turns] = read;
+                var read = CollectDigits(
+                    binarized,
+                    turns,
+                    workDirectory,
+                    ref passes,
+                    cancellationToken,
+                    out var recognizedDigits);
+                votes.AddRange(read);
+                byOrientation[turns] = read;
+                recognizedAnyDigits |= recognizedDigits;
 
-                    if (DigitCandidates.HasStrongWinner(votes))
-                    {
-                        break;
-                    }
+                if (DigitCandidates.HasStrongWinner(votes))
+                {
+                    break;
                 }
             }
+        }
 
-            if (!DigitCandidates.HasStrongWinner(votes))
+        if (!DigitCandidates.HasStrongWinner(votes))
+        {
+            // Second opinion with a global threshold. Upright orientations only, to stay in budget.
+            using var otsu = ImagePreprocessor.BinarizeOtsu(sharpened);
+            foreach (var turns in new[] { 0, 2 })
             {
-                // Second opinion with a global threshold. Upright orientations only, to stay in budget.
-                using var otsu = ImagePreprocessor.BinarizeOtsu(deskewed);
-                foreach (var turns in new[] { 0, 2 })
+                var read = CollectDigits(
+                    otsu,
+                    turns,
+                    workDirectory,
+                    ref passes,
+                    cancellationToken,
+                    out var recognizedDigits);
+                votes.AddRange(read);
+                recognizedAnyDigits |= recognizedDigits;
+
+                if (byOrientation.TryGetValue(turns, out var existing))
                 {
-                    var read = CollectDigits(otsu, turns, workDirectory, ref passes, cancellationToken);
-                    votes.AddRange(read);
+                    existing.AddRange(read);
+                }
+                else
+                {
+                    byOrientation[turns] = read;
+                }
 
-                    if (byOrientation.TryGetValue(turns, out var existing))
-                    {
-                        existing.AddRange(read);
-                    }
-                    else
-                    {
-                        byOrientation[turns] = read;
-                    }
-
-                    if (DigitCandidates.HasStrongWinner(votes))
-                    {
-                        break;
-                    }
+                if (DigitCandidates.HasStrongWinner(votes))
+                {
+                    break;
                 }
             }
         }
 
         var vote = DigitCandidates.Vote(votes);
         var rotation = ResolveRotation(vote.Value, byOrientation);
+        var value = vote.Value;
+        var paddleFallbackUsed = false;
+
+        if (vote.LowConfidence && (vote.Value is not null || recognizedAnyDigits))
+        {
+            var paddleRead = _paddleOcr.Read(sharpened, cancellationToken);
+            if (paddleRead is not null && paddleRead.Value != vote.Value)
+            {
+                value = paddleRead.Value;
+                rotation = paddleRead.QuarterTurns;
+                paddleFallbackUsed = true;
+            }
+        }
 
         _logger.LogInformation(
             "OCR number pass finished. Votes={Votes} WinnerShare={Share:F2} DirectRead={DirectRead} " +
-            "Rotation={Rotation} Skew={Skew:F1} Passes={Passes}",
+            "Rotation={Rotation} Skew={Skew:F1} Passes={Passes} PaddleFallbackUsed={PaddleFallbackUsed}",
             vote.Total,
             vote.Share,
             vote.HasDirectRead,
             rotation,
             skew,
-            passes);
+            passes,
+            paddleFallbackUsed);
 
-        return new NumberRead(vote.Value, vote.LowConfidence, rotation, skew);
+        return new NumberRead(value, vote.LowConfidence, rotation, skew);
     }
 
     private List<DigitCandidates.Candidate> CollectDigits(
@@ -216,11 +242,13 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         int quarterTurns,
         string workDirectory,
         ref int passes,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        out bool recognizedDigits)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         var candidates = new List<DigitCandidates.Candidate>();
+        recognizedDigits = false;
 
         using var rotated = ImagePreprocessor.RotateQuarterTurns(bitmap, quarterTurns);
         var path = Path.Combine(workDirectory, $"number-{quarterTurns}-{Guid.NewGuid():N}.png");
@@ -233,6 +261,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             using (english)
             {
                 var text = RunPass(english.Engine, path, PageSegMode.SparseText, WesternDigits);
+                recognizedDigits |= text.Any(char.IsDigit);
                 candidates.AddRange(DigitCandidates.Extract(text, $"eng-{quarterTurns}", direct: true));
                 passes++;
             }
@@ -246,6 +275,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             }
 
             var text = RunPass(arabic.Engine, path, PageSegMode.SparseText, AllDigits);
+            recognizedDigits |= text.Any(char.IsDigit);
             candidates.AddRange(DigitCandidates.Extract(text, $"ara-{quarterTurns}", direct: true));
             passes++;
         }
@@ -273,9 +303,10 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         using var deskewed = skew == 0
             ? oriented.Copy(SKColorType.Gray8)
             : ImagePreprocessor.Rotate(oriented, skew);
+        using var sharpened = ImagePreprocessor.Sharpen(deskewed);
 
         var path = Path.Combine(workDirectory, "text.png");
-        ImagePreprocessor.SavePng(deskewed, path);
+        ImagePreprocessor.SavePng(sharpened, path);
 
         string text;
         using (var lease = _arabicPool.Rent())
@@ -302,6 +333,98 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         }
 
         return (name, address);
+    }
+
+    private ArabicBackCardFields ReadBackFields(
+        SKBitmap decoded,
+        string workDirectory,
+        CancellationToken cancellationToken)
+    {
+        using var medium = ImagePreprocessor.ResizeToLongEdge(
+            decoded,
+            _options.TextLongEdge,
+            minimumLongEdge: 1200);
+        using var grayscale = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(medium));
+        using var probe = ImagePreprocessor.ResizeToLongEdge(grayscale, 420);
+        var skew = ImagePreprocessor.EstimateSkewDegrees(probe);
+        using var deskewed = skew == 0
+            ? grayscale.Copy(SKColorType.Gray8)
+            : ImagePreprocessor.Rotate(grayscale, skew);
+        using var sharpened = ImagePreprocessor.Sharpen(deskewed);
+        var fields = new ArabicBackCardFields(null, null, null);
+
+        foreach (var turns in OrientationOrder)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using var oriented = ImagePreprocessor.RotateQuarterTurns(sharpened, turns);
+            var path = Path.Combine(workDirectory, $"back-{turns}-{Guid.NewGuid():N}.png");
+            ImagePreprocessor.SavePng(oriented, path);
+
+            using var lease = _arabicPool.Rent();
+            if (lease is null)
+            {
+                return new ArabicBackCardFields(null, null, null);
+            }
+
+            var sparse = ArabicBackFields.Select(
+                RunPass(lease.Engine, path, PageSegMode.SparseText, whitelist: null));
+            fields = MergeBackFields(fields, sparse);
+            if (HasAllBackFields(fields))
+            {
+                return fields;
+            }
+
+            var automatic = ArabicBackFields.Select(
+                RunPass(lease.Engine, path, PageSegMode.Auto, whitelist: null));
+            fields = MergeBackFields(fields, automatic);
+            if (HasAllBackFields(fields))
+            {
+                return fields;
+            }
+        }
+
+        if (!HasAllBackFields(fields))
+        {
+            foreach (var turns in OrientationOrder)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using var oriented = ImagePreprocessor.RotateQuarterTurns(sharpened, turns);
+                var paddleText = _paddleOcr.ReadArabicText(oriented, cancellationToken);
+                fields = MergeBackFields(fields, ArabicBackFields.Select(paddleText));
+                if (HasAllBackFields(fields))
+                {
+                    break;
+                }
+            }
+
+            _logger.LogInformation(
+                "Back-side PaddleOCR fallback finished. Occupation={HasOccupation} " +
+                "MaritalStatus={HasMaritalStatus} ExpiryDate={HasExpiryDate}",
+                fields.Occupation is not null,
+                fields.MaritalStatus is not null,
+                fields.ExpiryDate is not null);
+        }
+
+        return fields;
+    }
+
+    private static ArabicBackCardFields MergeBackFields(
+        ArabicBackCardFields current,
+        ArabicBackCardFields candidate)
+    {
+        return new ArabicBackCardFields(
+            current.Occupation ?? candidate.Occupation,
+            current.MaritalStatus ?? candidate.MaritalStatus,
+            current.ExpiryDate ?? candidate.ExpiryDate);
+    }
+
+    private static bool HasAllBackFields(ArabicBackCardFields fields)
+    {
+        return fields.Occupation is not null
+            && fields.MaritalStatus is not null
+            && fields.ExpiryDate is not null;
     }
 
     private static string RunPass(
@@ -348,13 +471,20 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         return 0;
     }
 
-    private static IdCardScanResult BuildResult(NumberRead number, string? name, string? address)
+    private static IdCardScanResult BuildResult(
+        NumberRead number,
+        string? name,
+        string? address,
+        ArabicBackCardFields backFields)
     {
         var result = new IdCardScanResult
         {
             NationalId = number.Value,
             FullName = name,
             Address = address,
+            Occupation = backFields.Occupation,
+            MaritalStatus = backFields.MaritalStatus,
+            ExpiryDate = backFields.ExpiryDate,
             NationalIdValid = false,
             LowConfidence = number.LowConfidence
         };
@@ -399,6 +529,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         _scanSemaphore.Dispose();
         _arabicPool.Dispose();
         _englishPool.Dispose();
+        _paddleOcr.Dispose();
     }
 
     private sealed record NumberRead(string? Value, bool LowConfidence, int QuarterTurns, double Skew);

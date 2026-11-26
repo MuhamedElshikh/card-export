@@ -18,6 +18,15 @@ public class IdCard
     /// <summary>Address as reviewed by the user (may be empty).</summary>
     public string Address { get; set; } = string.Empty;
 
+    /// <summary>Occupation read from the back of the card, if available.</summary>
+    public string? Occupation { get; set; }
+
+    /// <summary>Marital status read from the card, if available.</summary>
+    public string? MaritalStatus { get; set; }
+
+    /// <summary>Card expiry date read from the back, if available.</summary>
+    public DateOnly? ExpiryDate { get; set; }
+
     /// <summary>Birth date derived from the national ID number.</summary>
     public DateOnly BirthDate { get; set; }
 
