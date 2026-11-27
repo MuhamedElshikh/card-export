@@ -33,6 +33,11 @@ internal static class EvalProgram
             return ExportGlyphs(args);
         }
 
+        if (args[0] == "--debug-text")
+        {
+            return DebugText(args);
+        }
+
         var folder = args[0];
         if (!Directory.Exists(folder))
         {
@@ -264,6 +269,193 @@ internal static class EvalProgram
         return 0;
     }
 
+    /// <summary>
+    /// Compares the name/address extraction across the pipeline settings on ONE of the user's own
+    /// photos and prints a numbered row per setting. The values never leave the machine: the user
+    /// reports back only which row number looks right, which pinpoints the failing stage. It also
+    /// writes the cropped image next to the photo so a bad crop is visible at a glance.
+    /// </summary>
+    private static int DebugText(string[] args)
+    {
+        if (args.Length != 2 || !File.Exists(args[1]))
+        {
+            Console.Error.WriteLine("Usage: IdCards.Eval --debug-text <front-photo.jpg>");
+            return 1;
+        }
+
+        Console.OutputEncoding = Encoding.UTF8;
+
+        using var decoded = ImagePreprocessor.DecodeWithOrientation(File.ReadAllBytes(args[1]));
+        if (decoded is null)
+        {
+            Console.Error.WriteLine("Could not decode the image (JPEG/PNG only).");
+            return 1;
+        }
+
+        using var cropped = CardRegion.CropToCard(decoded);
+        var cropPreviewPath = args[1] + ".cropped.png";
+        ImagePreprocessor.SavePng(cropped, cropPreviewPath);
+        Console.WriteLine($"Loaded      : {decoded.Width}x{decoded.Height}");
+        Console.WriteLine($"Crop preview: {cropPreviewPath} ({cropped.Width}x{cropped.Height} of {decoded.Width}x{decoded.Height})");
+        Console.WriteLine("Open it: it should show the FRONT of the card, upright, with the name and address not cut.");
+        Console.WriteLine();
+
+        var baseDir = AppContext.BaseDirectory;
+        var fastTessdata = Path.Combine(baseDir, "tessdata");
+        var bestTessdata = Path.Combine(baseDir, "tessdata-best");
+        if (!File.Exists(Path.Combine(fastTessdata, "ara.traineddata")))
+        {
+            Console.Error.WriteLine($"Fast Arabic model not found: {fastTessdata}");
+            return 1;
+        }
+
+        // The app learns the photo's orientation from the number search; this tool has to probe it.
+        // Raw letter counts tie-break on noise (a sideways read produces stray Arabic letters too),
+        // so the probe looks for words that must be on the card front and prefers 0° on a tie.
+        // Pass a rotation explicitly (--debug-text photo.jpg 0|90|180|270) to skip the probe.
+        using var fastEngine = CreateEngine(fastTessdata);
+        var bestTurns = 0;
+        if (args.Length >= 3 && int.TryParse(args[2], out var forcedDegrees))
+        {
+            bestTurns = ((forcedDegrees / 90) % 4 + 4) % 4;
+            Console.WriteLine($"Orientation : forced to {bestTurns * 90}° by argument");
+        }
+        else
+        {
+            var bestKeywords = 0;
+            var bestLetters = 0;
+            var probeScores = new List<string>();
+            foreach (var turns in new[] { 0, 2, 1, 3 })
+            {
+                var (letters, keywords) = ProbeOrientation(cropped, fastEngine, turns);
+                probeScores.Add($"{turns * 90}°={letters} letters/{keywords} card-words");
+                if (keywords > bestKeywords || (keywords == bestKeywords && bestKeywords == 0 && letters > bestLetters))
+                {
+                    bestKeywords = keywords;
+                    bestLetters = letters;
+                    bestTurns = turns;
+                }
+            }
+
+            Console.WriteLine($"Orientation : {string.Join("  ", probeScores)} -> using {bestTurns * 90}°");
+            if (bestKeywords == 0 && bestLetters < 40)
+            {
+                Console.WriteLine("WARNING: almost no Arabic text read at ANY rotation. Check the crop preview:");
+                Console.WriteLine("is this really the FRONT of the card, and is the photo sharp?");
+            }
+        }
+
+        Console.WriteLine();
+
+        Tesseract.TesseractEngine? bestEngine = File.Exists(Path.Combine(bestTessdata, "ara.traineddata"))
+            ? CreateEngine(bestTessdata)
+            : null;
+
+        var configs = new (string Label, SKBitmap Source, int LongEdge, bool Binarize, Tesseract.TesseractEngine Engine)[]
+        {
+            ("crop + best model + 1400 (current)", cropped, 1400, false, bestEngine ?? fastEngine),
+            ("crop + fast model + 1400", cropped, 1400, false, fastEngine),
+            ("crop + best model + 1800", cropped, 1800, false, bestEngine ?? fastEngine),
+            ("crop + fast model + 1800", cropped, 1800, false, fastEngine),
+            ("crop + best model + 1400 + binarized", cropped, 1400, true, bestEngine ?? fastEngine),
+            ("no crop + fast model + 1800 (old behavior)", decoded, 1800, false, fastEngine),
+        };
+
+        var row = 0;
+        foreach (var (label, source, longEdge, binarize, engine) in configs)
+        {
+            row++;
+
+            using var medium = ImagePreprocessor.ResizeToLongEdge(source, longEdge, minimumLongEdge: 1200);
+            using var gray = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(medium));
+            using var oriented = ImagePreprocessor.RotateQuarterTurns(gray, bestTurns);
+            using var probe = ImagePreprocessor.ResizeToLongEdge(oriented, 420);
+            var skew = ImagePreprocessor.EstimateSkewDegrees(probe);
+            using var deskewed = skew == 0 ? oriented.Copy(SKColorType.Gray8) : ImagePreprocessor.Rotate(oriented, skew);
+            using var sharpened = ImagePreprocessor.Sharpen(deskewed);
+            using var binarized = binarize ? ImagePreprocessor.BinarizeLocalMean(sharpened) : null;
+
+            // The exact image the OCR reads is saved next to the photo: open it to see what the
+            // engine saw (upright? sharp? cut?).
+            var rowImagePath = $"{args[1]}.row{row}.png";
+            ImagePreprocessor.SavePng(binarized ?? sharpened, rowImagePath);
+
+            var stopwatch = Stopwatch.StartNew();
+            string text;
+            using (var pix = Tesseract.Pix.LoadFromFile(rowImagePath))
+            using (var page = engine.Process(pix, Tesseract.PageSegMode.Auto))
+            {
+                text = page.GetText() ?? string.Empty;
+            }
+
+            stopwatch.Stop();
+
+            var lines = text.Split('\n').Count(line => !string.IsNullOrWhiteSpace(line));
+            var (name, address) = ArabicTextFields.Select(text);
+            Console.WriteLine($"[{row}] {label} — {stopwatch.Elapsed.TotalSeconds:F1}s, {lines} lines, {CountArabicLetters(text)} letters");
+            Console.WriteLine($"    image  : {rowImagePath}");
+            Console.WriteLine($"    name   : {name ?? "(none)"}");
+            Console.WriteLine($"    address: {address ?? "(none)"}");
+            Console.WriteLine();
+        }
+
+        bestEngine?.Dispose();
+        Console.WriteLine("Report back only the ROW NUMBER whose name/address look right; the values stay on your machine.");
+        return 0;
+    }
+
+    private static Tesseract.TesseractEngine CreateEngine(string tessdata)
+    {
+        var engine = new Tesseract.TesseractEngine(tessdata, "ara", Tesseract.EngineMode.LstmOnly);
+        engine.SetVariable("user_defined_dpi", "300");
+        engine.SetVariable("preserve_interword_spaces", "1");
+        return engine;
+    }
+
+    // Words that must appear on the front of an Egyptian national ID card. A rotation that finds
+    // them is the true orientation; letter counts alone tie-break on noise.
+    private static readonly string[] CardFrontWords =
+        { "جمهورية", "مصر", "قومي", "الشخصية", "الرقم", "الاسم", "العنوان" };
+
+    /// <summary>Counts Arabic letters and card-front words the fast model reads at one rotation.</summary>
+    private static (int Letters, int CardWords) ProbeOrientation(
+        SKBitmap source,
+        Tesseract.TesseractEngine engine,
+        int quarterTurns)
+    {
+        using var medium = ImagePreprocessor.ResizeToLongEdge(source, 1100, minimumLongEdge: 900);
+        using var gray = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(medium));
+        using var oriented = ImagePreprocessor.RotateQuarterTurns(gray, quarterTurns);
+
+        var temp = Path.Combine(Path.GetTempPath(), $"debug-probe-{Guid.NewGuid():N}.png");
+        try
+        {
+            ImagePreprocessor.SavePng(oriented, temp);
+            using var pix = Tesseract.Pix.LoadFromFile(temp);
+            using var page = engine.Process(pix, Tesseract.PageSegMode.Auto);
+            var text = page.GetText() ?? string.Empty;
+            return (CountArabicLetters(text), CardFrontWords.Count(text.Contains));
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    private static int CountArabicLetters(string text)
+    {
+        var count = 0;
+        foreach (var character in text)
+        {
+            if (character is >= '\u0621' and <= '\u064A')
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
     private static void PrintUsage()
     {
         Console.WriteLine("Usage: IdCards.Eval <images-folder> [ground-truth.csv]");
@@ -274,6 +466,11 @@ internal static class EvalProgram
         Console.WriteLine();
         Console.WriteLine("Example:");
         Console.WriteLine("  dotnet run --project Tools/IdCards.Eval -- samples/id-cards samples/ground-truth.csv");
+        Console.WriteLine();
+        Console.WriteLine("  --export-glyphs <photo> <14 digits> <templates.json>  add number glyphs from your own card");
+        Console.WriteLine("  --debug-text <front-photo> [rotation]  compare name/address extraction across pipeline");
+        Console.WriteLine("                              settings (crop x fast/best x 1400/1800, saves every OCR input).");
+        Console.WriteLine("                              rotation: 0, 90, 180 or 270 to skip the orientation probe.");
         Console.WriteLine();
         Console.WriteLine("This tool never generates or downloads sample ID images.");
     }

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -25,6 +25,7 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="2.88.9" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <None Include="tessdata\*.traineddata" CopyToOutputDirectory="Always" />
+    <None Include="tessdata-best\*.traineddata" CopyToOutputDirectory="Always" />
     <EmbeddedResource Include="Imaging\glyph-templates.json" LogicalName="glyph-templates.json" />
   </ItemGroup>
 

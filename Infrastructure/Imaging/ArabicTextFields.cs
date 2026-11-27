@@ -20,13 +20,37 @@ public static class ArabicTextFields
     {
         "جمهورية", "العربية", "بطاقة", "قومي", "المحافظة", "العنوان", "الاسم",
         "القاهرة", "الجيزة", "حدائق", "شارع", "حارة", "سكة", "طريق", "ميدان",
-        "منطقة", "قسم", "مركز", "قرية", "نجع", "كفر", "عزبة"
+        "منطقة", "قسم", "مركز", "قرية", "نجع", "كفر", "عزبة",
+        // The card's fixed vocabulary: never a person's name, no matter how cleanly read.
+        "وزارة", "الداخلية", "تحقيق", "شخصية", "مصر", "الرقم", "النوع", "الديانة",
+        "الجنسية", "تاريخ", "الميلاد", "الوظيفة", "الحالة", "الاجتماعية", "الانتهاء"
     };
 
     private static readonly string[] AddressLabels =
     {
         "محل الاقامة", "محل الإقامة", "العنوان", "عنوان"
     };
+
+    /// <summary>One OCR text line with its vertical position on the card and the read confidence.</summary>
+    public readonly record struct PositionedLine(string Text, double Top, double Confidence);
+
+    /// <summary>
+    /// Selects the name and address from positioned OCR lines (PP-OCRv5): lines under the
+    /// confidence floor are dropped and the rest is ordered top to bottom by its bounding box
+    /// before the usual label and layout rules run, so a noisy low-confidence line can no longer
+    /// displace the real fields.
+    /// </summary>
+    public static (string? Name, string? Address) SelectPositioned(
+        IEnumerable<PositionedLine> lines,
+        double minimumConfidence = 0.5)
+    {
+        var ordered = lines
+            .Where(line => line.Confidence >= minimumConfidence && !string.IsNullOrWhiteSpace(line.Text))
+            .OrderBy(line => line.Top)
+            .Select(line => line.Text);
+
+        return Select(string.Join('\n', ordered));
+    }
 
     /// <summary>Returns the best name and address found in the text, or nulls.</summary>
     public static (string? Name, string? Address) Select(string? text)
@@ -60,6 +84,33 @@ public static class ArabicTextFields
 
         name ??= ReadUnlabelledName(lines);
 
+        // PP-OCR's detector sometimes boxes the name and the first address line together (they
+        // sit close on the card). The house number then fails every name check, so split such a
+        // line at the first token that holds a digit: the prefix is the name candidate and the
+        // digit token starts the address candidates.
+        string? splitAddress = null;
+        var splitIndex = -1;
+        if (name is null)
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                var line = lines[index];
+                if (line.NameLabel || line.AddressLabel)
+                {
+                    continue;
+                }
+
+                var (prefix, suffix) = SplitAtFirstDigitToken(line.Text);
+                if (prefix is not null && IsNameLike(prefix))
+                {
+                    name = prefix;
+                    splitAddress = suffix;
+                    splitIndex = index;
+                    break;
+                }
+            }
+        }
+
         string? address = null;
         foreach (var line in lines)
         {
@@ -86,6 +137,35 @@ public static class ArabicTextFields
         // The current Egyptian card prints no labels: the address is the one or two lines that
         // follow the name. Only lines that look like addresses are taken, and only after a name.
         address ??= ReadAddressAfterName(lines, name);
+
+        if (address is null && splitIndex >= 0)
+        {
+            var parts = new List<string>();
+            if (IsAddressLike(splitAddress))
+            {
+                parts.Add(splitAddress!);
+            }
+
+            foreach (var next in lines.Skip(splitIndex + 1))
+            {
+                if (next.NameLabel || next.AddressLabel || !IsAddressLike(next.Text))
+                {
+                    continue;
+                }
+
+                parts.Add(next.Text);
+                if (parts.Count == 2)
+                {
+                    break;
+                }
+            }
+
+            address = parts.Count == 0 ? null : string.Join(" ", parts);
+        }
+
+        // The name's decorated font can defeat every reader while the address reads cleanly;
+        // a digit-anchored address (the house number) must not be held hostage by a missing name.
+        address ??= ReadUnlabelledAddress(lines);
 
         if (SameLine(address, name))
         {
@@ -127,6 +207,32 @@ public static class ArabicTextFields
         return following.Count == 0 ? null : string.Join(" ", following);
     }
 
+    /// <summary>
+    /// Finds the address without a name: the anchor is a line that carries a digit (the house
+    /// number) and still looks like an address; the following address-like line completes it.
+    /// </summary>
+    private static string? ReadUnlabelledAddress(IReadOnlyList<FieldLine> lines)
+    {
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var line = lines[index];
+            if (line.NameLabel || line.AddressLabel || !line.Text.Any(char.IsDigit) || !IsAddressLike(line.Text))
+            {
+                continue;
+            }
+
+            var following = lines
+                .Skip(index + 1)
+                .Where(next => !next.NameLabel && !next.AddressLabel && IsAddressLike(next.Text))
+                .Take(1)
+                .ToList();
+
+            return following.Count == 0 ? line.Text : $"{line.Text} {following[0].Text}";
+        }
+
+        return null;
+    }
+
     private static string? ReadUnlabelledName(IReadOnlyList<FieldLine> lines)
     {
         for (var index = 0; index < lines.Count; index++)
@@ -154,6 +260,33 @@ public static class ArabicTextFields
         }
 
         return null;
+    }
+
+    // The card's fixed phrases, tokenized and spelling-normalized, so even a slightly misread
+    // heading ("جمهوريه مصر العربيه") is never mistaken for a person.
+    private static readonly string[] CardPhrases =
+    {
+        "جمهورية مصر العربية", "بطاقة تحقيق شخصية", "وزارة الداخلية", "الرقم القومي"
+    };
+
+    private static readonly HashSet<string> CardVocabulary = CardPhrases
+        .SelectMany(phrase => phrase.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        .Select(NormalizeToken)
+        .ToHashSet(StringComparer.Ordinal);
+
+    private static bool IsCardVocabulary(string[] tokens)
+    {
+        return tokens.Length > 0 && tokens.All(token => CardVocabulary.Contains(NormalizeToken(token)));
+    }
+
+    private static string NormalizeToken(string token)
+    {
+        return token
+            .Replace('\u0623', '\u0627') // أ -> ا
+            .Replace('\u0625', '\u0627') // إ -> ا
+            .Replace('\u0622', '\u0627') // آ -> ا
+            .Replace('\u0649', '\u064A') // ى -> ي
+            .Replace('\u0629', '\u0647'); // ة -> ه
     }
 
     private static bool IsSingleNamePart(string value)
@@ -184,7 +317,20 @@ public static class ArabicTextFields
             return false;
         }
 
+        // OCR noise tends to fragment into one and two letter shards ("بم عاله"); real Egyptian
+        // name parts are longer. Requiring 3+ letters per token kills that garbage without
+        // rejecting real names.
+        if (tokens.Any(token => token.Length < 3))
+        {
+            return false;
+        }
+
         if (trimmed.Any(char.IsDigit) || tokens.Any(token => NotAName.Contains(token, StringComparer.Ordinal)))
+        {
+            return false;
+        }
+
+        if (IsCardVocabulary(tokens))
         {
             return false;
         }
@@ -218,6 +364,26 @@ public static class ArabicTextFields
         }
 
         return LetterRatio(trimmed) >= MinimumAddressLetterRatio;
+    }
+
+    /// <summary>
+    /// Splits a line at the first token holding a digit (a house number starts the address on
+    /// the card). The digit token itself belongs to the address side.
+    /// </summary>
+    private static (string? Prefix, string? Suffix) SplitAtFirstDigitToken(string text)
+    {
+        var tokens = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < tokens.Length; index++)
+        {
+            if (tokens[index].Any(char.IsDigit))
+            {
+                var prefix = string.Join(' ', tokens[..index]);
+                var suffix = string.Join(' ', tokens[index..]);
+                return (prefix.Length == 0 ? null : prefix, suffix.Length == 0 ? null : suffix);
+            }
+        }
+
+        return (null, null);
     }
 
     private static bool SameLine(string? left, string? right)
@@ -314,11 +480,12 @@ public static class ArabicTextFields
 
         var text = string.Join(' ', builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
-        // Diacritics add no value for matching and confuse the letter ratio.
+        // Diacritics add no value for matching and confuse the letter ratio. Neural readers
+        // also emit the superscript alef and the Quranic annotation marks for decorated fonts.
         var withoutDiacritics = new StringBuilder(text.Length);
         foreach (var character in text)
         {
-            if (character is >= '\u064B' and <= '\u0652')
+            if (character is >= '\u064B' and <= '\u065F' or '\u0670' or >= '\u06D6' and <= '\u06ED')
             {
                 continue;
             }

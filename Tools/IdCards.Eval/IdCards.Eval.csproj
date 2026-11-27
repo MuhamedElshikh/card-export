@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <None Include="..\..\Infrastructure\tessdata\ara.traineddata" Link="tessdata\ara.traineddata" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\Infrastructure\tessdata-best\ara.traineddata" Link="tessdata-best\ara.traineddata" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\Infrastructure\tessdata\eng.traineddata" Link="tessdata\eng.traineddata" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
