@@ -71,7 +71,25 @@ Legend: `[x]` done and verified, `[~]` in progress, `[ ]` not started.
 - [x] Tests: 19 application + 12 API + 47 infrastructure = **78 green, 0 warnings**.
 - [ ] Tune digit/name recognition on the user's real photo (still not supplied).
 
+## Phase 8 — OCR quality and speed (user complaint: extracted text quality, 20s per scan)
+- [x] `CardRegion`: conservative card detection (Sobel borders, ID-1 aspect, support scoring) and
+      crop before OCR; full image kept on any doubt. 5 new tests on synthetic photos.
+- [x] tessdata_best Arabic model (`tessdata-best/ara.traineddata`) used for the name/address read
+      only (`Ocr:BestTessdataPath`); fast models keep reading the number and the back side.
+- [x] Name/address read tries up to three variants (grayscale Auto, grayscale SparseText,
+      binarised Auto) and merges the best fields instead of stopping after one pass.
+- [x] The Arabic digit pass is skipped once the English pass settles the vote (glyph read counts
+      as the second independent read; the no-invented-data rule is unchanged).
+- [x] `Ocr:TextLongEdge` 1800 → 1400: reads run after the crop, so the text is effectively larger
+      while each pass costs ~40 % fewer pixels.
+- [x] `Ocr:ParallelLanes` (default on): front text, back side and number reads run on parallel
+      lanes; PP-OCRv5 engine access is locked for thread safety.
+- [ ] Glyph templates for digits 1 and 7 still missing — needs the user's own card photos with
+      `IdCards.Eval --export-glyphs photo.jpg <14 digit number> glyph-templates.json`.
+- [ ] Real accuracy/latency numbers on the user's photos still pending.
+
 ## Known gaps (honest list)
-- Card contour detection + perspective correction is not implemented (no usable OpenCV binding on net8).
-- Per-field crops from a JSON layout template are not implemented; whole-image OCR is used.
+- Perspective warp of a tilted card is not implemented (no usable OpenCV binding on net8); the
+  card crop is axis-aligned.
+- Per-field crops from a JSON layout template are not implemented; whole-card OCR is used.
 - No measured accuracy numbers yet: the harness exists, the images must come from the user.

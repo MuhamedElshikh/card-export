@@ -42,6 +42,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
     private readonly ScanGate _scanGate;
     private readonly TimeSpan _scanTimeout;
     private readonly TesseractEnginePool _arabicPool;
+    private readonly TesseractEnginePool _arabicBestPool;
     private readonly TesseractEnginePool _englishPool;
     private readonly PaddleOcrNumberReader _paddleOcr = new();
     private readonly GlyphDigitReader _glyphReader = GlyphDigitReader.LoadDefault();
@@ -68,6 +69,13 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         }
 
         _englishPool = new TesseractEnginePool(tessdataPath, "eng");
+
+        // The accurate (tessdata_best) Arabic model is optional: when it is not deployed the
+        // fast model answers the text passes too.
+        var bestTessdataPath = string.IsNullOrWhiteSpace(_options.BestTessdataPath)
+            ? Path.Combine(AppContext.BaseDirectory, "tessdata-best")
+            : _options.BestTessdataPath;
+        _arabicBestPool = new TesseractEnginePool(bestTessdataPath, "ara");
 
         var concurrency = Math.Max(1, _options.MaxConcurrentScans);
         _scanSemaphore = new SemaphoreSlim(concurrency, concurrency);
@@ -105,7 +113,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
                 {
                     // Tesseract is synchronous and CPU bound; keep it off the request thread.
                     return await Task.Run(
-                            () => Scan(frontImageBytes, backImageBytes, budget.Token),
+                            async () => await Scan(frontImageBytes, backImageBytes, budget.Token).ConfigureAwait(false),
                             budget.Token)
                         .ConfigureAwait(false);
                 }
@@ -126,13 +134,19 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         }
     }
 
-    private IdCardScanResult Scan(
+    private async Task<IdCardScanResult> Scan(
         byte[] frontImageBytes,
         byte[] backImageBytes,
         CancellationToken cancellationToken)
     {
         using var front = DecodeImage(frontImageBytes);
         using var back = DecodeImage(backImageBytes);
+
+        // Whole-photo OCR reads the table/hand/background as text and shrinks the card's real
+        // pixels. Crop to the card first; a failed detection keeps the full image.
+        using var frontCard = CardRegion.CropToCard(front);
+        using var backCard = CardRegion.CropToCard(back);
+
         var workDirectory = Path.Combine(Path.GetTempPath(), $"idcard-{Guid.NewGuid():N}");
         Directory.CreateDirectory(workDirectory);
 
@@ -140,13 +154,36 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         {
             // The printed number uses a decorative Arabic-Indic font Tesseract cannot read, so both
             // sides are first matched glyph by glyph. Agreement of the two sides skips the slow passes.
-            var frontGlyph = TryReadGlyphNumber(front, cancellationToken);
-            var backGlyph = TryReadGlyphNumber(back, cancellationToken);
-            var number = frontGlyph is { } f && backGlyph is { } b && f.Value == b.Value
-                ? new NumberRead(f.Value, LowConfidence: false, f.QuarterTurns, f.Skew)
-                : ReadNationalId(front, workDirectory, SeedVotes(frontGlyph, backGlyph), frontGlyph, cancellationToken);
-            var (name, address) = ReadText(front, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
-            var backFields = ReadBackFields(back, workDirectory, cancellationToken);
+            var frontGlyph = TryReadGlyphNumber(frontCard, cancellationToken);
+            var backGlyph = TryReadGlyphNumber(backCard, cancellationToken);
+
+            if (frontGlyph is { } glyphFront && backGlyph is { } glyphBack && glyphFront.Value == glyphBack.Value)
+            {
+                var glyphNumber = new NumberRead(glyphFront.Value, LowConfidence: false, glyphFront.QuarterTurns, glyphFront.Skew);
+                var glyphBackTask = _options.ParallelLanes
+                    ? Task.Run(() => ReadBackFields(backCard, workDirectory, cancellationToken), cancellationToken)
+                    : null;
+                var (glyphName, glyphAddress) = ReadText(frontCard, workDirectory, glyphNumber.QuarterTurns, glyphNumber.Skew, cancellationToken);
+                var glyphBackFields = glyphBackTask is null
+                    ? ReadBackFields(backCard, workDirectory, cancellationToken)
+                    : await glyphBackTask.ConfigureAwait(false);
+                return BuildResult(glyphNumber, glyphName, glyphAddress, glyphBackFields);
+            }
+
+            // The three reads are independent: the back side does not need the number's
+            // orientation, and the front text read starts as soon as the number is known.
+            var numberTask = Task.Run(
+                () => ReadNationalId(frontCard, workDirectory, SeedVotes(frontGlyph, backGlyph), frontGlyph, cancellationToken),
+                cancellationToken);
+            var backTask = _options.ParallelLanes
+                ? Task.Run(() => ReadBackFields(backCard, workDirectory, cancellationToken), cancellationToken)
+                : null;
+
+            var number = await numberTask.ConfigureAwait(false);
+            var (name, address) = ReadText(frontCard, workDirectory, number.QuarterTurns, number.Skew, cancellationToken);
+            var backFields = backTask is null
+                ? ReadBackFields(backCard, workDirectory, cancellationToken)
+                : await backTask.ConfigureAwait(false);
 
             return BuildResult(number, name, address, backFields);
         }
@@ -257,10 +294,10 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
                     binarized,
                     turns,
                     workDirectory,
+                    votes,
                     ref passes,
                     cancellationToken,
                     out var recognizedDigits);
-                votes.AddRange(read);
                 if (byOrientation.TryGetValue(turns, out var seededRead))
                 {
                     seededRead.AddRange(read);
@@ -289,10 +326,10 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
                     otsu,
                     turns,
                     workDirectory,
+                    votes,
                     ref passes,
                     cancellationToken,
                     out var recognizedDigits);
-                votes.AddRange(read);
                 recognizedAnyDigits |= recognizedDigits;
 
                 if (byOrientation.TryGetValue(turns, out var existing))
@@ -345,6 +382,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
         SKBitmap bitmap,
         int quarterTurns,
         string workDirectory,
+        List<DigitCandidates.Candidate> accumulatedVotes,
         ref int passes,
         CancellationToken cancellationToken,
         out bool recognizedDigits)
@@ -371,6 +409,15 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             }
         }
 
+        accumulatedVotes.AddRange(candidates);
+
+        // When the English pass already settles the vote (for example it agrees with the glyph
+        // reader), the Arabic pass adds nothing; the two-independent-reads rule is already met.
+        if (DigitCandidates.HasStrongWinner(accumulatedVotes))
+        {
+            return candidates;
+        }
+
         using (var arabic = _arabicPool.Rent())
         {
             if (arabic is null)
@@ -380,7 +427,9 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
 
             var text = RunPass(arabic.Engine, path, PageSegMode.SparseText, AllDigits);
             recognizedDigits |= text.Any(char.IsDigit);
-            candidates.AddRange(DigitCandidates.Extract(text, $"ara-{quarterTurns}", direct: true));
+            var arabicRead = DigitCandidates.Extract(text, $"ara-{quarterTurns}", direct: true);
+            candidates.AddRange(arabicRead);
+            accumulatedVotes.AddRange(arabicRead);
             passes++;
         }
 
@@ -409,34 +458,170 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
             : ImagePreprocessor.Rotate(oriented, skew);
         using var sharpened = ImagePreprocessor.Sharpen(deskewed);
 
-        var path = Path.Combine(workDirectory, "text.png");
-        ImagePreprocessor.SavePng(sharpened, path);
+        string? bestName = null;
+        var bestNameTokens = 0;
+        string? bestAddress = null;
 
-        string text;
-        using (var lease = _arabicPool.Rent())
+        // PP-OCRv5 (default engine): its neural line detector finds the text lines on the card's
+        // patterned background that Tesseract's page segmentation misses, and every line carries
+        // a confidence the selection can filter on. It is the same bundled engine that already
+        // reads the national ID number, so it adds no download and no cloud dependency.
+        if (UsePaddleText)
         {
-            if (lease is null)
+            try
             {
-                return (null, null);
-            }
+                var lines = _paddleOcr.ReadArabicLines(sharpened, cancellationToken);
+                var (name, address) = ArabicTextFields.SelectPositioned(
+                    lines.Select(line => new ArabicTextFields.PositionedLine(line.Text, line.Top, line.Confidence)));
+                (bestName, bestNameTokens, bestAddress) =
+                    MergeTextCandidate(bestName, bestNameTokens, bestAddress, name, address);
 
-            text = RunPass(lease.Engine, path, PageSegMode.Auto, whitelist: null);
+                // Diagnostic for tuning the selection: every line's confidence and shape
+                // (token/letter/digit counts, + kept / - dropped by the confidence floor).
+                // The text itself and its position on the card stay private.
+                _logger.LogInformation(
+                    "PP-OCR front read: {LineCount} lines, {KeptCount} over the confidence floor; " +
+                    "name found: {HasName}, address found: {HasAddress}; lines: {LineShapes}",
+                    lines.Count,
+                    lines.Count(line => line.Confidence >= 0.5),
+                    name is not null,
+                    address is not null,
+                    string.Join("  ", lines.Select(line => DescribeLine(line, sharpened.Height))));
+                LogRawLines(lines, "front");
+
+                // The name is printed in a heavy decorated font that the recognizer reads worst
+                // at the default size: retry once on a larger, unsharpened image before giving
+                // up on it. Only runs when the first read left the name empty.
+                if (bestNameTokens < 3)
+                {
+                    using var big = ImagePreprocessor.ResizeToLongEdge(decoded, 2000, minimumLongEdge: 1200);
+                    using var bigGray = ImagePreprocessor.StretchContrast(ImagePreprocessor.ToGrayscale(big));
+                    using var bigOriented = quarterTurns == 0
+                        ? bigGray.Copy(SKColorType.Gray8)
+                        : ImagePreprocessor.RotateQuarterTurns(bigGray, quarterTurns);
+                    using var bigDeskewed = skew == 0
+                        ? bigOriented.Copy(SKColorType.Gray8)
+                        : ImagePreprocessor.Rotate(bigOriented, skew);
+
+                    var retryLines = _paddleOcr.ReadArabicLines(bigDeskewed, cancellationToken);
+                    var (retryName, retryAddress) = ArabicTextFields.SelectPositioned(
+                        retryLines.Select(line => new ArabicTextFields.PositionedLine(line.Text, line.Top, line.Confidence)));
+                    (bestName, bestNameTokens, bestAddress) =
+                        MergeTextCandidate(bestName, bestNameTokens, bestAddress, retryName, retryAddress);
+
+                    _logger.LogInformation(
+                        "PP-OCR front retry read (larger, unsharpened): {LineCount} lines; " +
+                        "name found: {HasName}, address found: {HasAddress}; lines: {LineShapes}",
+                        retryLines.Count,
+                        retryName is not null,
+                        retryAddress is not null,
+                        string.Join("  ", retryLines.Select(line => DescribeLine(line, bigDeskewed.Height))));
+                    LogRawLines(retryLines, "front retry");
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "PP-OCR text read failed; falling back to Tesseract for the front fields.");
+            }
         }
 
-        var (name, address) = ArabicTextFields.Select(text);
-
-        if (name is null && address is null)
+        // Tesseract: the fallback for gaps in the PP-OCR read, or the configured engine. Each
+        // field keeps the best variant, not the first: a longer name is more complete, a longer
+        // address more likely carries the full street. The binarised variant was dropped on
+        // purpose: thresholding the card's patterned background erases more text than it reveals.
+        if (bestNameTokens < 3 || bestAddress is null)
         {
-            // Layout analysis failed to produce usable lines; try a sparse scan before giving up.
-            using var lease = _arabicPool.Rent();
-            if (lease is not null)
+            var path = Path.Combine(workDirectory, "text.png");
+            ImagePreprocessor.SavePng(sharpened, path);
+
+            foreach (var pageSegMode in new[] { PageSegMode.Auto, PageSegMode.SparseText })
             {
-                var sparse = RunPass(lease.Engine, path, PageSegMode.SparseText, whitelist: null);
-                (name, address) = ArabicTextFields.Select(sparse);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using var lease = RentTextEngine();
+                if (lease is null)
+                {
+                    break;
+                }
+
+                var (name, address) = ArabicTextFields.Select(RunPass(lease.Engine, path, pageSegMode, whitelist: null));
+                (bestName, bestNameTokens, bestAddress) =
+                    MergeTextCandidate(bestName, bestNameTokens, bestAddress, name, address);
+
+                if (bestNameTokens >= 3 && bestAddress is not null)
+                {
+                    break;
+                }
             }
         }
 
-        return (name, address);
+        return (bestName, bestAddress);
+    }
+
+    /// <summary>
+    /// Writes the raw line texts to the local log when Ocr:LogRawText is on. Off by default:
+    /// the lines hold the card holder's personal data.
+    /// </summary>
+    private void LogRawLines(IReadOnlyList<PaddleTextLine> lines, string pass)
+    {
+        if (!_options.LogRawText)
+        {
+            return;
+        }
+
+        for (var index = 0; index < lines.Count; index++)
+        {
+            _logger.LogInformation("PP-OCR {Pass} line {Index}: {Text}", pass, index + 1, lines[index].Text);
+        }
+    }
+
+    /// <summary>
+    /// Privacy-safe one-line shape of an OCR line: +kept/-dropped confidence, tokens/letters/
+    /// digits, and the line's top edge as a percentage of the image height (layout, not text).
+    /// </summary>
+    private static string DescribeLine(PaddleTextLine line, int imageHeight)
+    {
+        var tokens = line.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+        var letters = line.Text.Count(char.IsLetter);
+        var digits = line.Text.Count(char.IsDigit);
+        var kept = line.Confidence >= 0.5 ? '+' : '-';
+        var topPercent = imageHeight <= 0 ? 0 : (int)Math.Round(line.Top * 100.0 / imageHeight);
+        return $"{kept}{line.Confidence:0.00} {tokens}t/{letters}L/{digits}d @{topPercent}%";
+    }
+
+    /// <summary>Keeps the more complete variant of each field: more name tokens, longer address.</summary>
+    private static (string? Name, int NameTokens, string? Address) MergeTextCandidate(
+        string? bestName,
+        int bestNameTokens,
+        string? bestAddress,
+        string? name,
+        string? address)
+    {
+        var nameTokens = name?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0;
+        if (nameTokens > bestNameTokens)
+        {
+            bestName = name;
+            bestNameTokens = nameTokens;
+        }
+
+        if (address is not null && (bestAddress is null || address.Length > bestAddress.Length))
+        {
+            bestAddress = address;
+        }
+
+        return (bestName, bestNameTokens, bestAddress);
+    }
+
+    /// <summary>True unless the front text read is pinned to Tesseract in the configuration.</summary>
+    private bool UsePaddleText =>
+        !string.Equals(_options.TextEngine, "tesseract", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Rents the accurate text model when deployed, otherwise the fast Arabic model.</summary>
+    private TesseractEnginePool.Lease? RentTextEngine()
+    {
+        return _arabicBestPool.Rent() ?? _arabicPool.Rent();
     }
 
     private ArabicBackCardFields ReadBackFields(
@@ -632,6 +817,7 @@ public sealed class TesseractIdCardOcrService : IIdCardOcrService, IDisposable
     {
         _scanSemaphore.Dispose();
         _arabicPool.Dispose();
+        _arabicBestPool.Dispose();
         _englishPool.Dispose();
         _paddleOcr.Dispose();
     }

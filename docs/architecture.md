@@ -104,8 +104,10 @@ SQLite builds the schema from the model (`EnsureCreated`).
    independent direct reads; a single read is reported as `lowConfidence=true`. PP-OCRv5 is used
    only when a whole validated line has model confidence >= 0.90 and only one distinct valid
    candidate remains. A fallback result stays `lowConfidence=true` for user review.
-6. Front-side name/address are read once at `Ocr:TextLongEdge` (1800 px) on the winning orientation with the
-   Arabic model (Auto layout, SparseText retry). `ArabicTextFields` strips the **whole** label
+6. Front-side name/address are read at `Ocr:TextLongEdge` (1400 px, after the card crop) on the winning
+   orientation with the accurate Arabic model when `tessdata-best` is deployed (fast model otherwise).
+   Up to three variants run (grayscale Auto, grayscale SparseText, binarised Auto) and the best
+   name/address fields are merged. `ArabicTextFields` strips the **whole** label
    (including `بالكامل`, which otherwise becomes the "name"), requires at least two name tokens,
    rejects card headings and common address markers, and can join a preceding single name token to
    an unlabelled name line. Cards without labels: the one or two address-like lines after the name
@@ -126,9 +128,12 @@ SQLite builds the schema from the model (`EnsureCreated`).
    vote count, share, rotation, skew, pass count and fallback field-presence flags — never names,
    addresses, numbers or bytes.
 
-**Still not implemented:** card contour detection and perspective warp. They need a contour/Hough
-pipeline that no usable net8.0 binding provides here. Photographs where the card occupies only a
-small part of the frame still rely on whole-image OCR.
+**Card crop:** `CardRegion` locates the card in the photo (Sobel edges, two long horizontal and
+two long vertical borders, ID-1 aspect ratio, border-support scoring) and crops away the
+background before any OCR pass. Detection is conservative — any doubt keeps the full image.
+Cropping removes background text noise and gives every pass more pixels per character.
+**Still not implemented:** perspective warp of a tilted card. That needs a contour/Hough
+pipeline that no usable net8.0 binding provides here; the crop is axis-aligned.
 
 ## Decisions and deviations
 
